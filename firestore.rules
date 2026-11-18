@@ -1,0 +1,90 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // --- Validation Blueprints ---
+    
+    function isValidUser(data) {
+      return data.uid == request.auth.uid &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+             data.photoURL is string && data.photoURL.size() <= 2097152 &&
+             data.xp is number && data.xp >= 0 &&
+             data.level is number && data.level >= 1 &&
+             data.keys().hasAll(['uid', 'displayName', 'xp', 'level']) &&
+             data.keys().size() <= 10;
+    }
+
+    function isValidRoom(data) {
+      return data.hostId is string && data.hostId.size() <= 128 &&
+             data.status in ['waiting', 'playing', 'finished'] &&
+             data.maxPlayers is number && data.maxPlayers >= 3 && data.maxPlayers <= 12 &&
+             data.players is list && data.players.size() <= data.maxPlayers &&
+             data.keys().hasAll(['hostId', 'status', 'maxPlayers', 'players']) &&
+             (!('category' in data) || (data.category is string && data.category.size() <= 32)) &&
+             (!('difficulty' in data) || data.difficulty in ['easy', 'hard']) &&
+             (!('turnDurationSeconds' in data) || (data.turnDurationSeconds is number && data.turnDurationSeconds >= 15 && data.turnDurationSeconds <= 180)) &&
+             (!('mrWhiteCount' in data) || (data.mrWhiteCount is number && data.mrWhiteCount >= 1 && data.mrWhiteCount <= 2)) &&
+             (!('undercoverCount' in data) || (data.undercoverCount is number && data.undercoverCount >= 0 && data.undercoverCount <= 3)) &&
+             (!('gameState' in data) || data.gameState is map) &&
+             data.keys().size() <= 22;
+    }
+
+    // --- Rules ---
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isVerified() && isValidId(userId) && userId == request.auth.uid && isValidUser(incoming());
+      allow update: if isVerified() && isValidId(userId) && userId == request.auth.uid && isValidUser(incoming()) &&
+                    incoming().uid == existing().uid; // Immutable UID
+    }
+
+    match /rooms/{roomId} {
+      allow read: if isSignedIn();
+      allow create: if isVerified() && isValidId(roomId) && incoming().hostId == request.auth.uid && isValidRoom(incoming());
+      
+      allow update: if isVerified() && isValidId(roomId) && 
+                    existing().status != 'finished' && // Terminal State Locking
+                    isValidRoom(incoming()) && (
+        // Action: Host Update (Full control keeping hostId)
+        (request.auth.uid == existing().hostId && incoming().hostId == existing().hostId) ||
+        // Action: Host Migration or Manual Transfer (Current host transfers ownership on leave or promotes a remaining player)
+        (request.auth.uid == existing().hostId &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['hostId', 'hostName', 'hostAvatar', 'players']) &&
+         incoming().players.size() > 0 &&
+         incoming().players.size() <= existing().players.size()) ||
+        // Action: Player Join/Ready/Vote/Chat (Restricted keys & no late join while playing)
+        (incoming().diff(existing()).affectedKeys().hasOnly(['players', 'gameState', 'messages']) &&
+         incoming().hostId == existing().hostId &&
+         incoming().status == existing().status &&
+         (existing().status == 'waiting' || incoming().players.size() <= existing().players.size()) &&
+         (!('kickedPlayers' in existing()) || !(request.auth.uid in existing().kickedPlayers) || incoming().players.size() <= existing().players.size()))
+      );
+
+      allow delete: if isVerified() && request.auth.uid == existing().hostId;
+    }
+
+    match /friendRequests/{requestId} {
+      allow read: if isVerified() && (request.auth.uid == existing().fromId || request.auth.uid == existing().toId);
+      allow create: if isVerified() && isValidId(requestId) && incoming().fromId == request.auth.uid;
+      allow update: if isVerified() && request.auth.uid == existing().toId && incoming().diff(existing()).affectedKeys().hasOnly(['status']);
+      allow delete: if isVerified() && (request.auth.uid == existing().fromId || request.auth.uid == existing().toId);
+    }
+
+    match /friendships/{friendshipId} {
+      allow read: if isVerified() && (request.auth.uid == existing().user1 || request.auth.uid == existing().user2);
+      allow create: if isVerified() && isValidId(friendshipId) && (request.auth.uid == incoming().user1 || request.auth.uid == incoming().user2);
+      allow delete: if isVerified() && (request.auth.uid == existing().user1 || request.auth.uid == existing().user2);
+    }
+  }
+}

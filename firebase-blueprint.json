@@ -1,0 +1,98 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A player's profile and statistics.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The user's unique ID." },
+        "displayName": { "type": "string", "description": "The user's display name." },
+        "photoURL": { "type": "string", "description": "The user's avatar URL." },
+        "xp": { "type": "number", "description": "Experience points." },
+        "level": { "type": "number", "description": "Player level." },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "wins": { "type": "number" },
+            "hosted": { "type": "number" },
+            "played": { "type": "number" },
+            "longestStreak": { "type": "number" }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "xp", "level"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "A multiplayer game room.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "hostId": { "type": "string" },
+        "hostName": { "type": "string" },
+        "hostAvatar": { "type": "string" },
+        "status": { "type": "string", "enum": ["waiting", "playing", "finished"] },
+        "maxPlayers": { "type": "number" },
+        "language": { "type": "string" },
+        "isPrivate": { "type": "boolean" },
+        "category": { "type": "string" },
+        "difficulty": { "type": "string", "enum": ["easy", "hard"] },
+        "turnDurationSeconds": { "type": "number" },
+        "mrWhiteCount": { "type": "number" },
+        "undercoverCount": { "type": "number" },
+        "secretCode": { "type": "string" },
+        "kickedPlayers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "messages": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "players": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "uid": { "type": "string" },
+              "name": { "type": "string" },
+              "avatar": { "type": "string" },
+              "isReady": { "type": "boolean" },
+              "isImpostor": { "type": "boolean" },
+              "isEliminated": { "type": "boolean" },
+              "role": { "type": "string" },
+              "score": { "type": "number" },
+              "vote": { "type": "string" }
+            }
+          }
+        },
+        "gameState": {
+          "type": "object",
+          "properties": {
+            "phase": { "type": "string" },
+            "category": { "type": "string" },
+            "difficulty": { "type": "string" },
+            "secretWord": { "type": "string" },
+            "impostorId": { "type": "string" },
+            "undercoverId": { "type": "string" },
+            "turnIndex": { "type": "number" },
+            "winner": { "type": "string" }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "hostId", "status", "maxPlayers"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Stores user profiles."
+    },
+    "/rooms/{roomId}": {
+      "schema": { "$ref": "#/entities/Room" },
+      "description": "Stores active and past game rooms."
+    }
+  }
+}
