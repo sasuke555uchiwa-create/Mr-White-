@@ -26,7 +26,7 @@ import {
   getRoleTitle,
   getSpecialRoleDescription,
 } from '../data/specialRoles';
-import tableFeltBackdrop from '../src/assets/images/table_felt_backdrop_1794601446491.jpg';
+import tableFeltBackdrop from '../src/assets/images/table_felt_backdrop_1794601446491.webp';
 
 interface QuestionPhaseProps {
   players: Player[];
@@ -93,8 +93,14 @@ export const QuestionPhase: React.FC<QuestionPhaseProps> = ({
   const [showLoversReminder, setShowLoversReminder] = useState<boolean>(hasActiveLovers);
 
   useEffect(() => {
-    pickNewTurn();
-  }, []);
+    setExpressionSequence([]);
+    setCurrentSequenceIndex(0);
+    setRoundCount(0);
+    setShowPrompt(false);
+    setAsker(null);
+    setTarget(null);
+    pickNewTurn(undefined, true);
+  }, [currentRound]);
 
   useEffect(() => {
     if (isPaused || showPrompt || showLoversReminder || timeLeft <= 0) return;
@@ -114,9 +120,12 @@ export const QuestionPhase: React.FC<QuestionPhaseProps> = ({
     return () => clearInterval(timer);
   }, [timeLeft, isPaused, showPrompt, showLoversReminder]);
 
-  const pickNewTurn = (previousTarget?: Player) => {
+  const pickNewTurn = (previousTarget?: Player, forceFreshSequence = false) => {
     if (gameMode === 'expression') {
-      let sequence = expressionSequence;
+      const aliveIds = new Set(alivePlayers.map((p) => p.id));
+      let sequence = forceFreshSequence
+        ? []
+        : expressionSequence.filter((p) => aliveIds.has(p.id));
       let nextIdx = currentSequenceIndex;
 
       if (sequence.length === 0) {
@@ -132,6 +141,7 @@ export const QuestionPhase: React.FC<QuestionPhaseProps> = ({
         setExpressionSequence(shuffled);
         nextIdx = 0;
       } else {
+        setExpressionSequence(sequence);
         nextIdx = (currentSequenceIndex + 1) % sequence.length;
       }
 
@@ -770,6 +780,7 @@ export const QuestionPhase: React.FC<QuestionPhaseProps> = ({
                     <img
                       src={getRoleAsset(role)}
                       alt={getRoleTitle(role, lang)}
+                      loading="lazy"
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-contain"
                     />

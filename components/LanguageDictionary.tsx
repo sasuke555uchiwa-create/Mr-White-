@@ -10,6 +10,7 @@ import {
 } from '../services/storageService';
 import { WORD_PAIRS } from '../data/offlineData';
 import { getUITranslation } from '../translations';
+import { useAuth } from '../contexts/AuthContext';
 
 interface LanguageDictionaryProps {
   onBack: () => void;
@@ -20,6 +21,7 @@ type CategoryFilter = (typeof CATEGORIES)[number];
 type WordCategory = Exclude<CategoryFilter, 'all'>;
 
 export const LanguageDictionary: React.FC<LanguageDictionaryProps> = ({ onBack }) => {
+  const { isAdmin } = useAuth();
   const settings = getSettings();
   const isRTL = ['ar', 'sa'].includes(settings.language);
   const t = (key: string) => getUITranslation(settings.language, key);
@@ -255,13 +257,13 @@ export const LanguageDictionary: React.FC<LanguageDictionaryProps> = ({ onBack }
               <div className="flex items-center gap-4 flex-1">
                 <div className="flex-1 text-center">
                   <span className="text-sm font-black text-text-main block">
-                    {pair.isBase && !settings.isAdmin ? '••••' : pair.word1}
+                    {pair.isBase && !isAdmin ? '••••' : pair.word1}
                   </span>
                 </div>
                 <div className="w-px h-8 bg-border" />
                 <div className="flex-1 text-center">
                   <span className="text-sm font-black text-text-main block">
-                    {pair.isBase && !settings.isAdmin ? '••••' : pair.word2}
+                    {pair.isBase && !isAdmin ? '••••' : pair.word2}
                   </span>
                 </div>
               </div>

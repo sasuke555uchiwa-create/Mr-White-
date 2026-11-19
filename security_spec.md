@@ -1,26 +1,27 @@
-# Security Specification - Undercover Game
+# Mr. White — Security Specification & Threat Model
 
-## Data Invariants
-1. **User Ownership**: A user document (`/users/{userId}`) can only be created or modified by the user with the matching `uid`.
-2. **Room Creation Authenticity**: A room can only be created by an authenticated user who is set as the `hostId`.
-3. **Room Membership**: Only the host or existing players in the `players` list can modify a room's state (joining, readying, starting game).
-4. **Immutability of IDs**: Sensitive fields like `hostId` in a room and `uid` in a user profile must remain unchanged after creation.
-5. **Terminal State**: Once a room's `status` is set to `finished`, no further modifications are allowed to the room state.
-6. **Interaction Isolation**: Friend requests can only be initiated by the sender and responded to by the receiver.
+## 1. Data Invariants
+1. **Zero Secret Leakage**: `rooms/{roomId}` MUST NEVER contain `secretWord`, `undercoverWord`, `rolesByUid`, `votesByUid`, or `secretCode`. Per-player secrets reside exclusively in `rooms/{roomId}/privatePlayers/{uid}`, room invite codes live in `rooms/{roomId}/privateMeta/invite`, and authoritative match state (`rolesByUid`, `votesByUid`, `settledMatches`) lives in server-only `rooms/{roomId}/privateState/current`.
+2. **Server-Authoritative Progression & Settlement**: Clients cannot directly create, modify, or delete `rooms`, `privatePlayers`, `privateMeta`, `privateState`, `roomCodes`, `friendRequests`, or `friendships`. Every state transition is executed inside a Firestore Transaction by Firebase Cloud Functions (`firebase-admin`).
+3. **Immutable XP, Level & Match Stats**: Users cannot self-award XP, inflate levels, spoof wins/hosted/played counts, or inject `isAdmin`/`role` privileges in `users/{uid}` or `publicProfiles/{uid}`.
+4. **PII Isolation (Split Collection)**: Private user records (`users/{uid}`, containing `connectedAccounts`) are readable only by the owner (`request.auth.uid == userId`) or a verified admin. Social screens (`LeaderboardSection`, `FriendsSection`, `PlayerStatsModal`) read strictly from `publicProfiles/{uid}`.
+5. **Private Room & Waiting Query Enforcement**: Listing `/rooms` is restricted to documents where `isPrivate == false && status == 'waiting'`. Private rooms or active matches cannot be enumerated via `list` queries.
+6. **Master Gate Membership Isolation**: Accessing `rooms/{roomId}/privatePlayers/{playerUid}` requires `request.auth.uid == playerUid` AND active membership in `rooms/{roomId}.playerIds`.
+7. **Admin Privilege Verification**: Admin access is never derived from client `localStorage` flags or hardcoded frontend passcodes. Verification relies on `admins/{uid}` + Firebase Custom Claims (`admin === true`) / verified bootstrapped admin email.
+8. **Temporal Integrity & Strict Allowlists**: Client profile creation and updates require `updatedAt == request.time` (`serverTimestamp()`), bounded string/media lengths, and strict `keys().hasOnly(...)` / `affectedKeys().hasOnly(...)` checks.
 
-## The "Dirty Dozen" Payloads (Deny Cases)
-1. **Identity Spoofing**: Attempting to create a user profile with a different `auth.uid`.
-2. **Ghost Field Injection**: Adding an `isAdmin` field to a user profile or room.
-3. **Invalid ID Poisoning**: Using extremely long or malicious characters as a document ID.
-4. **Self-Promotion**: Non-host user attempting to change the room `status` to `playing` without using allowed update paths.
-5. **State Shortcut**: Changing room `status` from `waiting` directly to `finished`.
-6. **Resource Exhaustion**: Sending a room description or player name that is 1MB in size.
-7. **Orphaned Write**: Creating a friend request to a non-existent user.
-8. **Privilege Escalation**: A player attempting to remove the host from the room.
-9. **Timestamp Manipulation**: Providing a client-side `createdAt` date instead of `request.time`.
-10. **Terminal Bypass**: Trying to update a `finished` game room.
-11. **PII Leak**: A stranger attempting to list all user profiles with sensitive fields.
-12. **Foreign Join**: Joining a room after it has already started (`playing` status).
+---
 
-## Test Runner (Verification)
-The `firestore.rules.test.ts` file will verify these denial cases using the Firebase Rules Emulator.
+## 2. The "Dirty Dozen" Attack Payloads (Expected: `PERMISSION_DENIED`)
+1. **Fake Profile XP Injection (`users/{uid}` update)**: `{ "xp": 99999, "level": 99, "updatedAt": <serverTimestamp> }` by owner -> **DENIED** (`xp`, `level` are immutable from client).
+2. **Admin Escalation Shadow Field (`users/{uid}` create/update)**: `{ "uid": "<uid>", "displayName": "Hacker", "isAdmin": true, "xp": 0, "level": 1, ... }` -> **DENIED** (`keys().hasOnly` & `affectedKeys().hasOnly` reject `isAdmin`).
+3. **Cross-User PII Read (`users/{victimUid}` get)**: Authenticated non-owner reads another user's `/users/{victimUid}` document -> **DENIED** (`request.auth.uid != userId`).
+4. **User Directory Enumeration (`users` list)**: Authenticated user runs `getDocs(collection(db, 'users'))` -> **DENIED** (`allow list: if false`).
+5. **Leaderboard XP Tampering (`publicProfiles/{uid}` update)**: Authenticated owner updates `publicProfiles/{uid}` with `{ "xp": 50000, "stats": { "wins": 500 } }` -> **DENIED**.
+6. **Private Room Listing Leak (`rooms` list without filter)**: Client queries `collection(db, 'rooms')` or filters `where('isPrivate', '==', true)` -> **DENIED** (`isPrivate == false && status == 'waiting'` enforced).
+7. **Private Room Unauthorized Get (`rooms/{privateRoomId}` get)**: Non-member authenticated user attempts `getDoc(doc(db, 'rooms', privateRoomId))` -> **DENIED**.
+8. **Direct Room State Mutation (`rooms/{roomId}` update/create)**: Host or player writes directly to `rooms/{roomId}` (e.g., setting `gameState.winner` or `hostId`) -> **DENIED** (`allow create, update, delete: if false`).
+9. **Cross-Player Secret Word Snooping (`rooms/{roomId}/privatePlayers/{otherUid}` get)**: Player reads another player's `privatePlayers` doc to learn who Mr. White / Undercover is -> **DENIED**.
+10. **Non-Member Invite Code Snooping (`rooms/{roomId}/privateMeta/invite` get)**: User not in `rooms/{roomId}.playerIds` tries to read `privateMeta/invite` -> **DENIED**.
+11. **Server Private State Snooping (`rooms/{roomId}/privateState/current` get)**: Any client tries to read `civilianWord` or `votesByUid` -> **DENIED**.
+12. **Friend Request Forgery (`friendRequests/{id}` create/update)**: Attacker attempts to directly write `{ "fromId": "<victimUid>", "toId": "<attackerUid>", "status": "accepted" }` -> **DENIED** (`allow write: if false`).

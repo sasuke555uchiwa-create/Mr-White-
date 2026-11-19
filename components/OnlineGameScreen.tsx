@@ -1,20 +1,30 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { doc, onSnapshot, updateDoc, arrayUnion } from 'firebase/firestore';
-import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
-import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHandler';
-import { leaveOnlineRoom } from '../utils/onlineRoomService';
+import { useOnlineRoom } from '../hooks/useOnlineRoom';
+import { useTurnTimer } from '../hooks/useTurnTimer';
+import {
+  advanceOnlineTurn,
+  leaveOnlineRoom,
+  markOnlineRevealReady,
+  nextOnlineMatch,
+  proceedAfterOnlineVoteReveal,
+  resolveOnlineVotes,
+  returnOnlineToLobby,
+  startOnlineRound,
+  startOnlineVoting,
+  submitOnlineClue,
+  submitOnlineMrWhiteGuess,
+  submitOnlineVote,
+} from '../utils/onlineRoomService';
 import { RevealVoteResult } from './RevealVoteResult';
 import { ImpostorGuessScreen } from './ImpostorGuessScreen';
 import { ResultScreen } from './ResultScreen';
 import { ChatBox } from './ChatBox';
 import { Avatar } from './Avatar';
 import { PlayerStatsModal } from './PlayerStatsModal';
-import { getRandomWordPair } from '../services/geminiService';
-import { getPlayerRoundPoints } from '../services/gameScoring';
 import { getRoleAsset } from '../data/specialRoles';
 import { playSound } from '../services/soundService';
-import { Player } from '../types';
+import { Player, PlayerRole } from '../types';
 import {
   MessageCircle,
   XCircle,
@@ -29,11 +39,11 @@ import {
   ShieldAlert,
   Crown,
   Vote,
+  HelpCircle,
 } from 'lucide-react';
 import { getUITranslation } from '../translations';
 import { getSettings } from '../services/storageService';
 import { showToast } from '../utils/toast';
-import { calculateLevelFromXp } from '../utils/levelUtils';
 
 interface OnlineClue {
   id: string;
@@ -57,21 +67,19 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
   onReturnToLobby,
 }) => {
   const { user, profile } = useAuth();
-  const [room, setRoom] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showChat, setShowChat] = useState(false);
-  const [hasUpdatedProfile, setHasUpdatedProfile] = useState(false);
   const [selectedPlayerForStats, setSelectedPlayerForStats] = useState<any>(null);
   const [showWordPeek, setShowWordPeek] = useState(false);
   const [peekRevealed, setPeekRevealed] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [clueInput, setClueInput] = useState('');
   const [submittingClue, setSubmittingClue] = useState(false);
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [submittingVote, setSubmittingVote] = useState(false);
+  const [busyAction, setBusyAction] = useState(false);
 
   const isLeavingRef = useRef(false);
-  const prevHostIdRef = useRef<string | null>(null);
   const lastAutoAdvancedTurnRef = useRef<string | null>(null);
   const cluesEndRef = useRef<HTMLDivElement>(null);
 
@@ -87,103 +95,99 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
     return text;
   };
 
-  useEffect(() => {
-    if (!roomId || !user) return;
-    const roomRef = doc(db, 'rooms', roomId);
-    const unsubscribe = onSnapshot(
-      roomRef,
-      (docSnap) => {
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          if (
-            prevHostIdRef.current &&
-            prevHostIdRef.current !== data.hostId &&
-            data.hostId === user.uid
-          ) {
-            showToast(t('hostPromoted'), 'info');
-          }
-          prevHostIdRef.current = data.hostId;
-          setRoom(data);
-
-          if (data.status === 'waiting' && onReturnToLobby && !isLeavingRef.current) {
-            onReturnToLobby();
-          }
-        } else {
-          if (!isLeavingRef.current) {
-            showToast(t('roomClosed'), 'warning');
-            onBack();
-          }
-        }
-      },
-      (err) => {
-        handleFirestoreError(err, OperationType.GET, `rooms/${roomId}`);
-      }
-    );
-    return () => unsubscribe();
-  }, [roomId, user, onBack, onReturnToLobby]);
-
-  // Handle Offline with Host Migration
-  useEffect(() => {
-    const handleOffline = async () => {
-      if (isLeavingRef.current) return;
-      showToast(t('lostConnectionGame'), 'error');
-
-      if (room && user) {
-        isLeavingRef.current = true;
-        try {
-          await leaveOnlineRoom(roomId, user.uid);
-        } catch (e) {
-          console.error('Offline leave error', e);
-        }
-      }
+  const { room, privatePlayer } = useOnlineRoom({
+    roomId,
+    user,
+    isLeavingRef,
+    subscribePrivatePlayer: true,
+    onRoomClosed: () => {
+      showToast(t('roomClosed'), 'warning');
       onBack();
-    };
+    },
+    onKicked: () => {
+      showToast(t('kickedFromRoom'), 'error');
+      onBack();
+    },
+    onHostPromoted: () => {
+      showToast(t('hostPromoted'), 'info');
+    },
+    onOfflineLeave: () => {
+      showToast(t('lostConnectionGame'), 'error');
+      onBack();
+    },
+  });
 
-    window.addEventListener('offline', handleOffline);
-    return () => window.removeEventListener('offline', handleOffline);
-  }, [room, user, roomId, onBack]);
+  useEffect(() => {
+    if (!room || isLeavingRef.current) return;
+    if (room.status === 'waiting' && onReturnToLobby) {
+      onReturnToLobby();
+    }
+  }, [room, onReturnToLobby]);
 
   const isHost = room?.hostId === user?.uid;
   const gameState = room?.gameState || {};
   const phase: string = gameState.phase || 'SETUP_PENDING';
   const difficulty: 'easy' | 'hard' = gameState.difficulty || room?.difficulty || 'easy';
   const currentRound: number = gameState.round || 1;
-  const turnDurationSeconds: number = room?.turnDurationSeconds || 45;
+  const turnsCompleted: boolean = Boolean(gameState.turnsCompleted);
 
-  const players: Player[] = useMemo(
-    () =>
-      (room?.players || []).map((p: any, index: number) => ({
+  const timeLeftSeconds = useTurnTimer(
+    phase === 'PLAYING' && !turnsCompleted,
+    gameState.turnEndsAt,
+    500
+  );
+
+  // Map public players without ever exposing unrevealed opponent roles during active play
+  const players: Player[] = useMemo(() => {
+    const revealedMap: Record<string, PlayerRole> | undefined =
+      phase === 'RESULT' ? gameState.revealedResult?.rolesByUid : undefined;
+
+    return (room?.players || []).map((p: any, index: number) => {
+      let resolvedRole: PlayerRole = 'citizen';
+
+      if (phase === 'RESULT' && revealedMap?.[p.uid]) {
+        resolvedRole = revealedMap[p.uid];
+      } else if (phase === 'REVEAL_VOTE_RESULT' && p.uid === gameState.mostVotedId && gameState.mostVotedRevealedRole) {
+        resolvedRole = gameState.mostVotedRevealedRole as PlayerRole;
+      } else if (p.revealedRole) {
+        resolvedRole = p.revealedRole as PlayerRole;
+      } else if (
+        user &&
+        p.uid === user.uid &&
+        privatePlayer?.role &&
+        privatePlayer.role !== 'hidden'
+      ) {
+        resolvedRole = privatePlayer.role as PlayerRole;
+      }
+
+      return {
         id: index,
         uid: p.uid,
         name: p.name,
-        role: p.role || (p.uid === gameState.impostorId ? 'mrwhite' : 'citizen'),
-        isImpostor:
-          p.role === 'mrwhite' || p.role === 'undercover' || p.uid === gameState.impostorId,
+        role: resolvedRole,
+        isImpostor: resolvedRole === 'mrwhite' || resolvedRole === 'undercover',
         isEliminated: Boolean(p.isEliminated),
         score: p.score || 0,
         avatar: p.avatar,
-      })),
-    [room?.players, gameState.impostorId]
-  );
+      };
+    });
+  }, [
+    room?.players,
+    phase,
+    gameState.revealedResult,
+    gameState.mostVotedId,
+    gameState.mostVotedRevealedRole,
+    privatePlayer?.role,
+    user,
+  ]);
 
   const alivePlayers = useMemo(() => players.filter((p) => !p.isEliminated), [players]);
   const turnOrder: string[] = Array.isArray(gameState.turnOrder) ? gameState.turnOrder : [];
   const currentTurnIndex: number = gameState.currentTurnIndex || 0;
-  const turnsCompleted: boolean = Boolean(gameState.turnsCompleted);
   const clues: OnlineClue[] = Array.isArray(gameState.clues) ? gameState.clues : [];
   const activeSpeakerUid: string | null = !turnsCompleted
     ? turnOrder[currentTurnIndex] || null
     : null;
-
-  // Live clock tick for synced turn timer
-  useEffect(() => {
-    if (phase !== 'PLAYING' || turnsCompleted || !gameState.turnEndsAt) return;
-    setNowMs(Date.now());
-    const interval = setInterval(() => {
-      setNowMs(Date.now());
-    }, 500);
-    return () => clearInterval(interval);
-  }, [phase, turnsCompleted, gameState.turnEndsAt]);
 
   useEffect(() => {
     if (phase === 'PLAYING' && cluesEndRef.current) {
@@ -191,64 +195,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
     }
   }, [clues.length, phase]);
 
-  const timeLeftSeconds =
-    phase === 'PLAYING' && !turnsCompleted && gameState.turnEndsAt
-      ? Math.max(0, Math.ceil((gameState.turnEndsAt - nowMs) / 1000))
-      : 0;
-
-  const buildTurnOrder = (playersList: any[], roundNum: number): string[] => {
-    const alive = playersList.filter((p) => !p.isEliminated);
-    const shuffled = [...alive].sort(() => 0.5 - Math.random());
-    if (roundNum === 1 && shuffled.length > 1 && shuffled[0].role === 'mrwhite') {
-      const nonWhiteIdx = shuffled.findIndex((p) => p.role !== 'mrwhite');
-      if (nonWhiteIdx > 0) {
-        const tmp = shuffled[0];
-        shuffled[0] = shuffled[nonWhiteIdx];
-        shuffled[nonWhiteIdx] = tmp;
-      }
-    }
-    return shuffled.map((p) => p.uid);
-  };
-
-  const updateGameState = async (updates: any) => {
-    if (!room) return;
-    try {
-      const roomRef = doc(db, 'rooms', roomId);
-      await updateDoc(roomRef, {
-        gameState: { ...gameState, ...updates },
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `rooms/${roomId}`);
-    }
-  };
-
-  const advanceTurn = async (extraClue?: OnlineClue) => {
-    if (!room || phase !== 'PLAYING') return;
-    const aliveSet = new Set(alivePlayers.map((p) => p.uid));
-    let nextIdx = currentTurnIndex + 1;
-    while (nextIdx < turnOrder.length && !aliveSet.has(turnOrder[nextIdx])) {
-      nextIdx += 1;
-    }
-
-    const updatedClues = extraClue ? [...clues, extraClue].slice(-80) : clues;
-
-    if (nextIdx >= turnOrder.length) {
-      await updateGameState({
-        clues: updatedClues,
-        turnsCompleted: true,
-        turnEndsAt: null,
-      });
-    } else {
-      await updateGameState({
-        clues: updatedClues,
-        currentTurnIndex: nextIdx,
-        turnEndsAt: Date.now() + turnDurationSeconds * 1000,
-        turnsCompleted: false,
-      });
-    }
-  };
-
-  // Auto-advance if turn timer hits 0 OR active speaker left/was eliminated
+  // Auto-advance via server if timer hits 0 OR active speaker left/was eliminated
   useEffect(() => {
     if (!room || !user || phase !== 'PLAYING' || turnsCompleted || turnOrder.length === 0) return;
 
@@ -259,7 +206,9 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
     if (!currentSpeakerAlive && isHost) {
       if (lastAutoAdvancedTurnRef.current !== turnKey) {
         lastAutoAdvancedTurnRef.current = turnKey;
-        advanceTurn();
+        void advanceOnlineTurn(roomId, 'skip', currentTurnIndex).catch((err) =>
+          console.warn('Auto advance missing speaker error:', err)
+        );
       }
       return;
     }
@@ -271,291 +220,25 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
     ) {
       if (lastAutoAdvancedTurnRef.current !== turnKey) {
         lastAutoAdvancedTurnRef.current = turnKey;
-        const speaker = players.find((p) => p.uid === activeSpeakerUid);
-        advanceTurn(
-          speaker
-            ? {
-                id: `${Date.now()}-skip`,
-                uid: speaker.uid || '',
-                name: speaker.name,
-                avatar: speaker.avatar,
-                text: isRTL ? '(انتهى الوقت)' : '(Timed out)',
-                round: currentRound,
-                skipped: true,
-              }
-            : undefined
+        void advanceOnlineTurn(roomId, 'timeout', currentTurnIndex).catch((err) =>
+          console.warn('Auto advance timeout error:', err)
         );
       }
     }
   }, [
+    room,
+    roomId,
+    user,
     phase,
     turnsCompleted,
     timeLeftSeconds,
     activeSpeakerUid,
     alivePlayers,
     isHost,
-    user,
     currentRound,
     currentTurnIndex,
     gameState.turnEndsAt,
     turnOrder.length,
-  ]);
-
-  const computePlayerOnlineXp = (
-    targetPlayer: any,
-    allPlayers: any[],
-    winner: 'impostor' | 'citizens',
-    reason: string,
-    winningMrWhiteUid?: string | null
-  ) => {
-    const mapped: Player[] = allPlayers.map((p: any, idx: number) => ({
-      id: idx,
-      uid: p.uid,
-      name: p.name,
-      role: p.role || (p.uid === gameState.impostorId ? 'mrwhite' : 'citizen'),
-      isImpostor:
-        p.role === 'mrwhite' || p.role === 'undercover' || p.uid === gameState.impostorId,
-      isEliminated: Boolean(p.isEliminated),
-      score: p.score || 0,
-      avatar: p.avatar,
-    }));
-
-    const selfMapped = mapped.find((p) => p.uid === targetPlayer.uid);
-    if (!selfMapped) return { xpDelta: 0, isWinner: false };
-
-    const winningMrWhiteId = winningMrWhiteUid
-      ? (mapped.find((p) => p.uid === winningMrWhiteUid)?.id ?? null)
-      : gameState.winningMrWhiteUid
-      ? (mapped.find((p) => p.uid === gameState.winningMrWhiteUid)?.id ?? null)
-      : null;
-
-    const roundPoints = getPlayerRoundPoints(
-      selfMapped,
-      mapped,
-      winner,
-      reason,
-      winningMrWhiteId
-    );
-
-    let xpDelta = roundPoints * 10;
-    const isBadGuy = selfMapped.role === 'mrwhite' || selfMapped.role === 'undercover';
-    if (!isBadGuy) {
-      const myVote = gameState.votes?.[targetPlayer.uid];
-      const badGuyUids = new Set(
-        mapped
-          .filter((p) => p.role === 'mrwhite' || p.role === 'undercover')
-          .map((p) => p.uid)
-          .filter(Boolean)
-      );
-      if (myVote && badGuyUids.has(myVote)) {
-        xpDelta += 20;
-      }
-    }
-
-    return { xpDelta, isWinner: roundPoints > 0 };
-  };
-
-  const calculateAndApplyScores = async (
-    winner: 'impostor' | 'citizens',
-    reason: string,
-    sourcePlayers?: any[],
-    winningMrWhiteUid?: string | null
-  ) => {
-    if (!room) return;
-    const basePlayers = sourcePlayers || room.players;
-    const updatedPlayers = basePlayers.map((p: any) => {
-      const { xpDelta } = computePlayerOnlineXp(p, basePlayers, winner, reason, winningMrWhiteUid);
-      return {
-        ...p,
-        score: (p.score || 0) + xpDelta,
-      };
-    });
-
-    try {
-      const roomRef = doc(db, 'rooms', roomId);
-      await updateDoc(roomRef, {
-        players: updatedPlayers,
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `rooms/${roomId}`);
-    }
-  };
-
-  const eliminatePlayerAndCheckWinOnline = async (eliminatedUid: string) => {
-    if (!room) return;
-    const updatedPlayers = room.players.map((p: any) =>
-      p.uid === eliminatedUid ? { ...p, isEliminated: true } : p
-    );
-
-    const aliveCitizens = updatedPlayers.filter(
-      (p: any) => !p.isEliminated && p.role !== 'mrwhite' && p.role !== 'undercover'
-    ).length;
-    const aliveBadGuys = updatedPlayers.filter(
-      (p: any) => !p.isEliminated && (p.role === 'mrwhite' || p.role === 'undercover')
-    ).length;
-
-    try {
-      await updateDoc(doc(db, 'rooms', roomId), { players: updatedPlayers });
-
-      if (aliveBadGuys === 0) {
-        await calculateAndApplyScores('citizens', 'impostor_caught', updatedPlayers);
-        await updateGameState({
-          phase: 'RESULT',
-          winReason: 'impostor_caught',
-          winner: 'citizens',
-        });
-      } else if (aliveBadGuys >= aliveCitizens || aliveCitizens <= 1) {
-        await calculateAndApplyScores('impostor', 'citizens_wrong_vote', updatedPlayers);
-        await updateGameState({
-          phase: 'RESULT',
-          winReason: 'citizens_wrong_vote',
-          winner: 'impostor',
-        });
-      } else {
-        const nextRound = currentRound + 1;
-        const nextTurnOrder = buildTurnOrder(updatedPlayers, nextRound);
-        await updateGameState({
-          phase: 'PLAYING',
-          round: nextRound,
-          turnOrder: nextTurnOrder,
-          currentTurnIndex: 0,
-          turnEndsAt: Date.now() + turnDurationSeconds * 1000,
-          turnsCompleted: false,
-          votes: {},
-          mostVotedId: null,
-          tieBroken: false,
-        });
-      }
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `rooms/${roomId}`);
-    }
-  };
-
-  const resolveVotesAndAdvance = async (votesMap: Record<string, string>) => {
-    if (!room) return;
-    const aliveSet = new Set(alivePlayers.map((p) => p.uid));
-    const counts: Record<string, number> = {};
-    Object.entries(votesMap).forEach(([voterUid, suspectUid]) => {
-      if (aliveSet.has(voterUid) && aliveSet.has(suspectUid)) {
-        counts[suspectUid] = (counts[suspectUid] || 0) + 1;
-      }
-    });
-
-    let maxVotes = 0;
-    let candidates: string[] = [];
-    Object.entries(counts).forEach(([uid, count]) => {
-      if (count > maxVotes) {
-        maxVotes = count;
-        candidates = [uid];
-      } else if (count === maxVotes) {
-        candidates.push(uid);
-      }
-    });
-
-    if (candidates.length === 0) return;
-
-    const tieBroken = candidates.length > 1;
-    const mostVotedId = tieBroken
-      ? candidates[Math.floor(Math.random() * candidates.length)]
-      : candidates[0];
-
-    await updateGameState({
-      phase: 'REVEAL_VOTE_RESULT',
-      mostVotedId,
-      tieBroken,
-    });
-  };
-
-  // Host transitions REVEAL -> PLAYING when all players mark ready
-  useEffect(() => {
-    if (
-      isHost &&
-      phase === 'REVEAL' &&
-      gameState.readyPlayers?.length >= players.length &&
-      players.length > 0
-    ) {
-      const nextTurnOrder = buildTurnOrder(room?.players || [], 1);
-      updateGameState({
-        phase: 'PLAYING',
-        round: 1,
-        turnOrder: nextTurnOrder,
-        currentTurnIndex: 0,
-        turnEndsAt: Date.now() + turnDurationSeconds * 1000,
-        turnsCompleted: false,
-        clues: [],
-        readyPlayers: [],
-        tieBroken: false,
-      });
-    }
-  }, [gameState.readyPlayers, phase, isHost, players.length]);
-
-  // Host transitions VOTING -> REVEAL_VOTE_RESULT when all alive players voted
-  useEffect(() => {
-    if (isHost && phase === 'VOTING' && gameState.votes) {
-      const aliveUids = new Set(alivePlayers.map((p) => p.uid));
-      const validVotesCount = Object.keys(gameState.votes).filter((uid) =>
-        aliveUids.has(uid)
-      ).length;
-      if (validVotesCount === alivePlayers.length && alivePlayers.length > 0) {
-        resolveVotesAndAdvance(gameState.votes);
-      }
-    }
-  }, [gameState.votes, phase, isHost, alivePlayers.length]);
-
-  // Update personal Firebase profile stats on RESULT
-  useEffect(() => {
-    if (phase === 'RESULT' && !hasUpdatedProfile && user && profile && room?.players) {
-      const updateProfileStats = async () => {
-        setHasUpdatedProfile(true);
-        const selfRaw = room.players.find((p: any) => p.uid === user.uid);
-        if (!selfRaw) return;
-
-        const winner = gameState.winner as 'impostor' | 'citizens';
-        const reason = gameState.winReason as string;
-        const { xpDelta, isWinner } = computePlayerOnlineXp(
-          selfRaw,
-          room.players,
-          winner,
-          reason,
-          gameState.winningMrWhiteUid
-        );
-
-        const userRef = doc(db, 'users', user.uid);
-        const newXp = (profile.xp || 0) + xpDelta;
-        const newLevel = calculateLevelFromXp(newXp);
-
-        const newStats = {
-          ...profile.stats,
-          played: (profile.stats?.played || 0) + 1,
-          wins: (profile.stats?.wins || 0) + (isWinner ? 1 : 0),
-        };
-
-        try {
-          await updateDoc(userRef, {
-            xp: newXp,
-            level: newLevel,
-            stats: newStats,
-          });
-        } catch (err) {
-          console.error('Failed to update profile stats', err);
-        }
-      };
-
-      updateProfileStats();
-    } else if (phase !== 'RESULT') {
-      setHasUpdatedProfile(false);
-    }
-  }, [
-    phase,
-    gameState.winner,
-    gameState.winReason,
-    gameState.winningMrWhiteUid,
-    gameState.impostorId,
-    gameState.votes,
-    room?.players,
-    user,
-    profile,
-    hasUpdatedProfile,
   ]);
 
   if (!room || !user) {
@@ -580,71 +263,11 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
   };
 
   const handleStartRound = async () => {
-    if (!isHost) return;
+    if (!isHost || isLoading) return;
     setIsLoading(true);
     setError(null);
-
     try {
-      const category = room.category || 'standard';
-      const roomDifficulty: 'easy' | 'hard' = room.difficulty || 'easy';
-      const { civilianWord, undercoverWord, decoys } = await getRandomWordPair(
-        room.language,
-        category
-      );
-
-      const playersList = [...room.players];
-      const numPlayers = playersList.length;
-      const numUndercover = numPlayers >= 8 ? 2 : numPlayers >= 5 ? 1 : 0;
-
-      const shuffledPlayers = [...playersList].sort(() => 0.5 - Math.random());
-      const updatedPlayers = playersList.map((p: any) => ({
-        ...p,
-        role: 'citizen',
-        isEliminated: false,
-      }));
-
-      // Assign Mr White
-      const mrWhitePlayer = shuffledPlayers[0];
-      const mrWhiteIndex = updatedPlayers.findIndex((p) => p.uid === mrWhitePlayer.uid);
-      updatedPlayers[mrWhiteIndex].role = 'mrwhite';
-
-      // Assign Undercover(s)
-      const undercoverIds: string[] = [];
-      for (let i = 1; i <= numUndercover && i < shuffledPlayers.length; i++) {
-        const ucPlayer = shuffledPlayers[i];
-        const ucIndex = updatedPlayers.findIndex((p) => p.uid === ucPlayer.uid);
-        if (ucIndex !== -1) {
-          updatedPlayers[ucIndex].role = 'undercover';
-          undercoverIds.push(ucPlayer.uid);
-        }
-      }
-
-      const roomRef = doc(db, 'rooms', roomId);
-      await updateDoc(roomRef, {
-        players: updatedPlayers,
-      });
-
-      await updateGameState({
-        phase: 'REVEAL',
-        round: 1,
-        category,
-        difficulty: roomDifficulty,
-        secretWord: civilianWord,
-        undercoverWord,
-        relatedWords: decoys,
-        impostorId: mrWhitePlayer.uid,
-        undercoverId: undercoverIds[0] || null,
-        undercoverIds,
-        winningMrWhiteUid: null,
-        readyPlayers: [],
-        clues: [],
-        turnOrder: [],
-        currentTurnIndex: 0,
-        turnsCompleted: false,
-        votes: {},
-        mostVotedId: null,
-        tieBroken: false,
-      });
+      await startOnlineRound(roomId);
     } catch (err) {
       console.error(err);
       setError(t('errorLoadingWords'));
@@ -654,14 +277,16 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
   };
 
   const handleRevealComplete = async () => {
+    if (busyAction) return;
+    setBusyAction(true);
     try {
       playSound('click');
-      const roomRef = doc(db, 'rooms', roomId);
-      await updateDoc(roomRef, {
-        'gameState.readyPlayers': arrayUnion(user.uid),
-      });
+      await markOnlineRevealReady(roomId);
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `rooms/${roomId}`);
+      console.error('Mark reveal ready failed:', err);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
     }
   };
 
@@ -676,88 +301,128 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
     try {
       playSound('pop');
       setClueInput('');
-      await advanceTurn({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        uid: user.uid,
-        name: me.name,
-        avatar: me.avatar,
-        text: trimmed.slice(0, 80),
-        round: currentRound,
-      });
+      await submitOnlineClue(roomId, trimmed.slice(0, 80));
+    } catch (err) {
+      console.error('Submit clue failed:', err);
+      showToast(t('errorOccurred'), 'error');
     } finally {
       setSubmittingClue(false);
     }
   };
 
   const handleManualSkipTurn = async () => {
-    if (!activeSpeakerUid || (!isHost && activeSpeakerUid !== user.uid)) return;
-    const speaker = players.find((p) => p.uid === activeSpeakerUid);
-    playSound('click');
-    await advanceTurn(
-      speaker
-        ? {
-            id: `${Date.now()}-skip`,
-            uid: speaker.uid || '',
-            name: speaker.name,
-            avatar: speaker.avatar,
-            text: isRTL ? '(تم التخطي)' : '(Skipped)',
-            round: currentRound,
-            skipped: true,
-          }
-        : undefined
-    );
+    if (!activeSpeakerUid || (!isHost && activeSpeakerUid !== user.uid) || busyAction) return;
+    setBusyAction(true);
+    try {
+      playSound('click');
+      await advanceOnlineTurn(roomId, 'skip', currentTurnIndex);
+    } catch (err) {
+      console.error('Skip turn failed:', err);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
+    }
   };
 
-  const handleTimeUp = () => {
-    if (isHost) {
+  const handleTimeUp = async () => {
+    if (!isHost || busyAction) return;
+    setBusyAction(true);
+    try {
       playSound('vote');
-      updateGameState({ phase: 'VOTING', votes: {}, readyPlayers: [], tieBroken: false });
+      await startOnlineVoting(roomId);
+    } catch (err) {
+      console.error('Start voting failed:', err);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
     }
   };
 
   const handleVote = async (suspectUid: string) => {
+    if (submittingVote || !suspectUid) return;
+    setSubmittingVote(true);
     try {
       playSound('vote');
-      const roomRef = doc(db, 'rooms', roomId);
-      await updateDoc(roomRef, {
-        [`gameState.votes.${user.uid}`]: suspectUid,
-      });
+      await submitOnlineVote(roomId, suspectUid);
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `rooms/${roomId}`);
+      console.error('Vote submission failed:', err);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setSubmittingVote(false);
+    }
+  };
+
+  const handleForceResolveVotes = async () => {
+    if (!isHost || busyAction) return;
+    setBusyAction(true);
+    try {
+      await resolveOnlineVotes(roomId);
+    } catch (err) {
+      console.error('Force resolve votes failed:', err);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleProceedVoteReveal = async () => {
+    if (!isHost || busyAction) return;
+    setBusyAction(true);
+    try {
+      await proceedAfterOnlineVoteReveal(roomId);
+    } catch (err) {
+      console.error('Proceed after vote reveal failed:', err);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
     }
   };
 
   const handleBackToLobbyFromResult = async () => {
-    if (!isHost || !room) return;
+    if (!isHost || busyAction) return;
+    setBusyAction(true);
     try {
-      const resetPlayers = (room.players || []).map((p: any) => ({
-        ...p,
-        isReady: false,
-        isEliminated: false,
-        role: 'citizen',
-      }));
-      await updateDoc(doc(db, 'rooms', roomId), {
-        status: 'waiting',
-        players: resetPlayers,
-        gameState: {},
-      });
+      await returnOnlineToLobby(roomId);
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `rooms/${roomId}`);
+      console.error('Return to lobby failed:', err);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleNextMatch = async () => {
+    if (!isHost || busyAction) return;
+    setBusyAction(true);
+    try {
+      await nextOnlineMatch(roomId);
+    } catch (err) {
+      console.error('Next match failed:', err);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
     }
   };
 
   const currentPlayer = players.find((p) => p.uid === user.uid);
-  const aliveMrWhites = alivePlayers.filter((p) => p.role === 'mrwhite').length;
-  const aliveUndercovers = alivePlayers.filter((p) => p.role === 'undercover').length;
-  const totalAliveInfiltrators = aliveMrWhites + aliveUndercovers;
+  const totalAliveInfiltrators =
+    typeof gameState.aliveInfiltratorsCount === 'number'
+      ? gameState.aliveInfiltratorsCount
+      : Number(gameState.infiltratorsCount || 0);
   const showMatchHud = ['PLAYING', 'VOTING', 'REVEAL_VOTE_RESULT'].includes(phase);
+  const votedUids: string[] = Array.isArray(gameState.votedUids) ? gameState.votedUids : [];
+  const hasMyVote = votedUids.includes(user.uid);
 
-  const renderWordCardInner = (playerObj?: Player) => {
-    const isBlindHardCard =
-      difficulty === 'hard' &&
-      (playerObj?.role === 'citizen' || playerObj?.role === 'undercover');
+  const renderWordCardInner = () => {
+    if (!privatePlayer) {
+      return (
+        <div className="py-6 flex flex-col items-center justify-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-primary mb-2"></div>
+        </div>
+      );
+    }
 
-    if (playerObj?.role === 'mrwhite') {
+    if (privatePlayer.role === 'mrwhite') {
       return (
         <div className="text-danger flex flex-col items-center">
           <img
@@ -772,7 +437,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       );
     }
 
-    if (isBlindHardCard) {
+    if (privatePlayer.role === 'hidden' || difficulty === 'hard') {
       return (
         <div className="text-sky-400 flex flex-col items-center">
           <div className="flex items-center justify-center gap-2 text-base font-black mb-3">
@@ -782,16 +447,14 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
           <p className="text-sm font-bold mb-2 text-text-muted">{t('secretWordIs')}</p>
           <div className="bg-bg-dark py-3 px-6 rounded-xl border border-sky-400/30 inline-block">
             <span className="text-3xl font-black text-text-main">
-              {playerObj?.role === 'undercover'
-                ? gameState.undercoverWord
-                : gameState.secretWord}
+              {privatePlayer.secretWord || '••••'}
             </span>
           </div>
         </div>
       );
     }
 
-    if (playerObj?.role === 'undercover') {
+    if (privatePlayer.role === 'undercover') {
       return (
         <div className="text-orange-400 flex flex-col items-center">
           <img
@@ -803,7 +466,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
           <span className="text-3xl sm:text-4xl font-black block mb-3">{t('undercoverRole')}</span>
           <p className="text-sm font-bold mb-2 text-text-muted">{t('secretWordIs')}</p>
           <div className="bg-bg-dark py-3 px-6 rounded-xl border border-orange-500/30 inline-block">
-            <span className="text-3xl font-black text-white">{gameState.undercoverWord}</span>
+            <span className="text-3xl font-black text-white">{privatePlayer.secretWord}</span>
           </div>
         </div>
       );
@@ -820,7 +483,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
         <span className="text-3xl sm:text-4xl font-black block mb-3">{t('citizenRole')}</span>
         <p className="text-sm font-bold mb-2 text-text-muted">{t('secretWordIs')}</p>
         <div className="bg-bg-dark py-3 px-6 rounded-xl border border-primary/30 inline-block">
-          <span className="text-3xl font-black text-white">{gameState.secretWord}</span>
+          <span className="text-3xl font-black text-white">{privatePlayer.secretWord}</span>
         </div>
       </div>
     );
@@ -897,13 +560,14 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
           <h2 className="text-2xl sm:text-3xl font-black mb-5 text-primary">{t('yourTurn')}</h2>
           <div className="card-modern p-7 w-full">
             <h3 className="text-lg font-bold text-text-muted mb-4">{t('youAreLabel')}</h3>
-            {renderWordCardInner(currentPlayer)}
+            {renderWordCardInner()}
           </div>
 
           {!isReady ? (
             <button
               onClick={handleRevealComplete}
-              className="btn-modern mt-6 w-full min-h-[54px] py-4 rounded-2xl font-black text-lg"
+              disabled={busyAction || !privatePlayer}
+              className="btn-modern mt-6 w-full min-h-[54px] py-4 rounded-2xl font-black text-lg disabled:opacity-50"
             >
               {t('iUnderstandReady')}
             </button>
@@ -973,7 +637,8 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
                   {(isHost || isMyTurn) && (
                     <button
                       onClick={handleManualSkipTurn}
-                      className="min-h-[40px] min-w-[40px] px-2.5 rounded-xl bg-white/5 hover:bg-white/15 text-text-muted hover:text-white border border-white/10 flex items-center justify-center gap-1 text-xs font-black"
+                      disabled={busyAction}
+                      className="min-h-[40px] min-w-[40px] px-2.5 rounded-xl bg-white/5 hover:bg-white/15 text-text-muted hover:text-white border border-white/10 flex items-center justify-center gap-1 text-xs font-black disabled:opacity-40"
                       title={t('skipTurn')}
                       aria-label={t('skipTurn')}
                     >
@@ -1016,9 +681,8 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
             </div>
           )}
 
-          {/* Clues Feed & Players Grid (Responsive 2 cols on lg) */}
+          {/* Clues Feed & Players Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
-            {/* Clues History Feed */}
             <div className="card-modern p-4 flex flex-col max-h-64 overflow-y-auto custom-scrollbar">
               <h3 className="text-xs font-black text-text-muted uppercase tracking-wider mb-3 text-start">
                 {t('cluesFeedTitle')}
@@ -1059,7 +723,6 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
               )}
             </div>
 
-            {/* Players Board */}
             <div className="grid grid-cols-2 gap-2.5">
               {players.map((p) => {
                 const isSpeaking = p.uid === activeSpeakerUid && !turnsCompleted;
@@ -1105,12 +768,12 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
             </div>
           </div>
 
-          {/* Footer Vote Trigger */}
           <div className="mt-auto pt-2">
             {isHost ? (
               <button
                 onClick={handleTimeUp}
-                className={`btn-modern w-full min-h-[52px] py-3.5 rounded-[2rem] font-black text-base flex items-center justify-center gap-2 ${
+                disabled={busyAction}
+                className={`btn-modern w-full min-h-[52px] py-3.5 rounded-[2rem] font-black text-base flex items-center justify-center gap-2 disabled:opacity-50 ${
                   turnsCompleted ? '' : 'btn-modern-danger'
                 }`}
               >
@@ -1130,12 +793,9 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
     }
 
     if (phase === 'VOTING') {
-      const votesMap: Record<string, string> = gameState.votes || {};
-      const myVote = votesMap[user.uid];
-      const hasVoted = !!myVote;
       const isEliminated = currentPlayer?.isEliminated;
       const aliveUids = new Set(alivePlayers.map((p) => p.uid));
-      const validVoteCount = Object.keys(votesMap).filter((uid) => aliveUids.has(uid)).length;
+      const validVoteCount = votedUids.filter((id) => aliveUids.has(id)).length;
 
       return (
         <div className="flex flex-col items-center flex-1 text-center p-4 pb-24 w-full max-w-2xl mx-auto gap-4">
@@ -1146,10 +806,9 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
             </p>
           </div>
 
-          {/* Live Voter Status Pills (non-spoiling) */}
           <div className="flex flex-wrap justify-center gap-1.5">
             {alivePlayers.map((p) => {
-              const voted = Boolean(p.uid && votesMap[p.uid]);
+              const voted = Boolean(p.uid && votedUids.includes(p.uid));
               return (
                 <div
                   key={p.uid}
@@ -1171,7 +830,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
               <h3 className="text-xl font-black text-danger mb-2">{t('youAreEliminated')}</h3>
               <p className="text-sm text-text-muted font-bold">{t('spectatorModeNote')}</p>
             </div>
-          ) : !hasVoted ? (
+          ) : !hasMyVote ? (
             <>
               <p className="text-sm font-bold text-text-muted">{t('whoIsImpostor')}</p>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 w-full">
@@ -1180,8 +839,9 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
                   .map((p) => (
                     <button
                       key={p.uid}
+                      disabled={submittingVote}
                       onClick={() => p.uid && handleVote(p.uid)}
-                      className="card-modern min-h-[116px] p-3 flex flex-col items-center justify-center hover:bg-danger/15 hover:border-danger active:scale-95 transition-all"
+                      className="card-modern min-h-[116px] p-3 flex flex-col items-center justify-center hover:bg-danger/15 hover:border-danger active:scale-95 transition-all disabled:opacity-50"
                     >
                       <Avatar avatar={p.avatar} name={p.name} size={56} className="mb-1.5" />
                       <span className="font-black text-sm truncate max-w-full">{p.name}</span>
@@ -1201,8 +861,9 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
 
           {isHost && validVoteCount > 0 && validVoteCount < alivePlayers.length && (
             <button
-              onClick={() => resolveVotesAndAdvance(votesMap)}
-              className="mt-auto px-5 py-3 rounded-2xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 font-black text-xs transition-colors"
+              onClick={handleForceResolveVotes}
+              disabled={busyAction}
+              className="mt-auto px-5 py-3 rounded-2xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 font-black text-xs transition-colors disabled:opacity-40"
             >
               {t('forceEndVote')}
             </button>
@@ -1213,26 +874,18 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
 
     if (phase === 'REVEAL_VOTE_RESULT') {
       const votedPlayer = players.find((p) => p.uid === gameState.mostVotedId);
+      const votersForEliminated: string[] = Array.isArray(gameState.votersForEliminated)
+        ? gameState.votersForEliminated
+        : [];
       return (
         <div className="relative h-full w-full">
           <RevealVoteResult
             votedPlayerId={votedPlayer?.id ?? -1}
-            impostorId={players.find((p) => p.uid === gameState.impostorId)?.id ?? -1}
-            undercoverId={players.find((p) => p.uid === gameState.undercoverId)?.id ?? null}
+            impostorId={votedPlayer?.role === 'mrwhite' ? votedPlayer.id : -1}
+            undercoverId={votedPlayer?.role === 'undercover' ? votedPlayer.id : null}
             players={players}
-            onNext={() => {
-              if (!isHost || !gameState.mostVotedId) return;
-              if (votedPlayer?.role === 'mrwhite') {
-                if (gameState.relatedWords && gameState.relatedWords.length > 0) {
-                  updateGameState({ phase: 'IMPOSTOR_GUESS' });
-                } else {
-                  eliminatePlayerAndCheckWinOnline(gameState.mostVotedId);
-                }
-              } else {
-                eliminatePlayerAndCheckWinOnline(gameState.mostVotedId);
-              }
-            }}
-            voters={players.filter((p) => p.uid && gameState.votes?.[p.uid] === gameState.mostVotedId)}
+            onNext={handleProceedVoteReveal}
+            voters={players.filter((p) => p.uid && votersForEliminated.includes(p.uid))}
             isOnline={true}
             isHost={isHost}
             tieBroken={Boolean(gameState.tieBroken)}
@@ -1242,7 +895,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
     }
 
     if (phase === 'IMPOSTOR_GUESS') {
-      const guesserUid = gameState.mostVotedId || gameState.impostorId;
+      const guesserUid = gameState.guesserUid || gameState.mostVotedId;
       const isImpostor = guesserUid === user.uid;
       const impostorPlayer = players.find((p) => p.uid === guesserUid);
 
@@ -1252,7 +905,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
             <h2 className="text-xl font-black text-amber-300 mb-4">{t('mrWhiteIsGuessing')}</h2>
             {isHost && (
               <button
-                onClick={() => eliminatePlayerAndCheckWinOnline(guesserUid)}
+                onClick={() => void submitOnlineMrWhiteGuess(roomId, '', true)}
                 className="btn-modern px-6 py-3 rounded-2xl font-black"
               >
                 {t('ok')}
@@ -1266,24 +919,8 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
         return (
           <ImpostorGuessScreen
             impostor={impostorPlayer}
-            secretWord={gameState.secretWord}
-            undercoverWord={gameState.undercoverWord}
-            relatedWords={gameState.relatedWords}
-            onGuess={async (isCorrect) => {
-              if (isCorrect) {
-                const winReason = 'impostor_guessed';
-                const winner = 'impostor';
-                await calculateAndApplyScores(winner, winReason, room.players, user.uid);
-                await updateGameState({
-                  phase: 'RESULT',
-                  winReason,
-                  winner,
-                  winningMrWhiteUid: user.uid,
-                });
-              } else {
-                await eliminatePlayerAndCheckWinOnline(guesserUid);
-              }
-            }}
+            onSubmitGuessText={(guessText) => submitOnlineMrWhiteGuess(roomId, guessText)}
+            onGuess={() => {}}
           />
         );
       }
@@ -1300,8 +937,10 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
     }
 
     if (phase === 'RESULT') {
+      const revealedResult = gameState.revealedResult || {};
+      const votesByUid: Record<string, string> = revealedResult.votesByUid || {};
       const mappedVotes: Record<number, number> = {};
-      Object.entries(gameState.votes || {}).forEach(([voterUid, votedUid]) => {
+      Object.entries(votesByUid).forEach(([voterUid, votedUid]) => {
         const voterId = players.find((p) => p.uid === voterUid)?.id;
         const votedId = players.find((p) => p.uid === votedUid)?.id;
         if (voterId !== undefined && votedId !== undefined) {
@@ -1311,7 +950,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
 
       const winningMrWhiteId =
         gameState.winReason === 'impostor_guessed'
-          ? (players.find((p) => p.uid === (gameState.winningMrWhiteUid || gameState.impostorId))
+          ? (players.find((p) => p.uid === (gameState.winningMrWhiteUid || revealedResult.impostorId))
               ?.id ?? null)
           : null;
 
@@ -1319,30 +958,12 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
         <div className="relative h-full w-full">
           <ResultScreen
             players={players}
-            impostorIndex={players.find((p) => p.uid === gameState.impostorId)?.id ?? -1}
-            secretWord={gameState.secretWord}
-            undercoverWord={gameState.undercoverWord}
+            impostorIndex={players.find((p) => p.uid === revealedResult.impostorId)?.id ?? -1}
+            secretWord={revealedResult.secretWord || ''}
+            undercoverWord={revealedResult.undercoverWord || ''}
             voteData={mappedVotes}
             onGameEnd={() => {}}
-            onNext={() => {
-              if (isHost) {
-                updateGameState({
-                  phase: 'SETUP_PENDING',
-                  round: 1,
-                  votes: {},
-                  readyPlayers: [],
-                  clues: [],
-                  turnOrder: [],
-                  currentTurnIndex: 0,
-                  turnsCompleted: false,
-                  mostVotedId: null,
-                  tieBroken: false,
-                  winReason: null,
-                  winner: null,
-                  winningMrWhiteUid: null,
-                });
-              }
-            }}
+            onNext={handleNextMatch}
             roundWinner={gameState.winner}
             winReason={gameState.winReason}
             winningMrWhiteId={winningMrWhiteId}
@@ -1372,7 +993,6 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
 
   return (
     <div className="relative min-h-full w-full flex flex-col">
-      {/* Compact Persistent Match HUD */}
       {showMatchHud && (
         <div className="w-full max-w-3xl mx-auto px-4 pt-3 pb-1 flex items-center justify-between gap-2 z-20">
           <div className="flex items-center gap-2 flex-wrap">
@@ -1385,12 +1005,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
             <span className="px-3 py-1.5 rounded-xl bg-rose-500/15 border border-rose-400/30 text-xs font-black text-rose-200 tabular-nums flex items-center gap-1.5">
               {difficulty === 'hard' ? (
                 <>
-                  <img
-                    src="/assets/roles/infiltrators_badge.png"
-                    alt="Infiltrators"
-                    referrerPolicy="no-referrer"
-                    className="w-4 h-4 object-contain"
-                  />
+                  <HelpCircle size={15} className="text-rose-300 shrink-0" />
                   <span>
                     {t('remainingIntruders')}: {totalAliveInfiltrators}
                   </span>
@@ -1428,7 +1043,6 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
         </div>
       )}
 
-      {/* Top quick exit button during SETUP_PENDING / REVEAL */}
       {!showMatchHud && phase !== 'RESULT' && (
         <div className="w-full max-w-3xl mx-auto px-4 pt-3 flex justify-end z-20">
           <button
@@ -1443,7 +1057,6 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
 
       <div className="flex-1 flex flex-col">{renderPhase()}</div>
 
-      {/* Floating Chat Button */}
       <button
         onClick={() => setShowChat(true)}
         className="fixed bottom-5 left-5 min-h-[54px] min-w-[54px] flex items-center justify-center bg-primary text-white rounded-full shadow-lg hover:bg-primary-dark transition-all z-40"
@@ -1455,7 +1068,6 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
         )}
       </button>
 
-      {/* Secret Word Peek Modal */}
       {showWordPeek && currentPlayer && (
         <div
           onClick={() => setShowWordPeek(false)}
@@ -1478,7 +1090,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
               </div>
             ) : (
               <div className="space-y-5">
-                {renderWordCardInner(currentPlayer)}
+                {renderWordCardInner()}
                 <button
                   onClick={() => setShowWordPeek(false)}
                   className="btn-modern btn-modern-outline w-full min-h-[48px] rounded-2xl font-black"
@@ -1491,7 +1103,6 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
         </div>
       )}
 
-      {/* Leave Room Confirmation Modal */}
       {showLeaveConfirm && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-5">
           <div className="card-modern p-6 w-full max-w-sm text-center">
@@ -1515,7 +1126,6 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
         </div>
       )}
 
-      {/* Chat Modal */}
       <ChatBox
         roomId={roomId}
         messages={room.messages || []}
@@ -1537,7 +1147,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
             !currentPlayer?.isEliminated &&
             !selectedPlayerForStats.isEliminated &&
             selectedPlayerForStats.uid !== user.uid &&
-            !gameState.votes?.[user.uid]
+            !hasMyVote
           }
           onVote={() => handleVote(selectedPlayerForStats.uid)}
         />

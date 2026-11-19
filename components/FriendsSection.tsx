@@ -18,65 +18,117 @@ export const FriendsSection: React.FC = () => {
   const isRTL = ['ar', 'sa'].includes(lang);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setRequests([]);
+      setFriends([]);
+      setLoading(false);
+      return;
+    }
+
+    let isMounted = true;
+    setLoading(true);
 
     // Listen for incoming friend requests
-    const qReq = query(collection(db, 'friendRequests'), where('toId', '==', user.uid), where('status', '==', 'pending'));
-    const unsubReq = onSnapshot(qReq, async (snapshot) => {
-      const reqs = [];
-      for (const docSnap of snapshot.docs) {
-        const data = docSnap.data();
-        try {
-          const userDoc = await getDoc(doc(db, 'users', data.fromId));
-          if (userDoc.exists()) {
-            reqs.push({ id: docSnap.id, ...data, user: userDoc.data() });
-          }
-        } catch (e) {
-          console.error(e);
+    const qReq = query(
+      collection(db, 'friendRequests'),
+      where('toId', '==', user.uid),
+      where('status', '==', 'pending')
+    );
+    const unsubReq = onSnapshot(
+      qReq,
+      async (snapshot) => {
+        const reqDocs = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        const reqs = await Promise.all(
+          reqDocs.map(async (data) => {
+            try {
+              const userDoc = await getDoc(doc(db, 'publicProfiles', data.fromId));
+              if (userDoc.exists()) {
+                return { ...data, user: userDoc.data() };
+              }
+            } catch (e) {
+              console.error(e);
+            }
+            return null;
+          })
+        );
+        if (isMounted) {
+          setRequests(reqs.filter(Boolean));
         }
-      }
-      setRequests(reqs);
-    }, (error) => handleFirestoreError(error, OperationType.LIST, 'friendRequests'));
+      },
+      (error) => handleFirestoreError(error, OperationType.LIST, 'friendRequests')
+    );
 
     // Listen for friendships
     const qFriends1 = query(collection(db, 'friendships'), where('user1', '==', user.uid));
     const qFriends2 = query(collection(db, 'friendships'), where('user2', '==', user.uid));
-    
-    const fetchFriends = async (snap1: any, snap2: any) => {
-      const friendList = [];
+
+    let docs1: any[] = [];
+    let docs2: any[] = [];
+    let loaded1 = false;
+    let loaded2 = false;
+
+    const syncFriends = async () => {
+      if (!loaded1 || !loaded2 || !isMounted) return;
       const friendIds = new Set<string>();
-      
-      snap1.docs.forEach((d: any) => friendIds.add(d.data().user2));
-      snap2.docs.forEach((d: any) => friendIds.add(d.data().user1));
-      
-      for (const fid of friendIds) {
-        try {
-          const userDoc = await getDoc(doc(db, 'users', fid));
-          if (userDoc.exists()) {
-            friendList.push({ id: fid, ...userDoc.data() });
+      docs1.forEach((d) => {
+        const u2 = d.data()?.user2;
+        if (u2) friendIds.add(u2);
+      });
+      docs2.forEach((d) => {
+        const u1 = d.data()?.user1;
+        if (u1) friendIds.add(u1);
+      });
+
+      const fetched = await Promise.all(
+        Array.from(friendIds).map(async (fid) => {
+          try {
+            const userDoc = await getDoc(doc(db, 'publicProfiles', fid));
+            if (userDoc.exists()) {
+              return { id: fid, ...userDoc.data() };
+            }
+          } catch (e) {
+            console.error(e);
           }
-        } catch (e) {
-          console.error(e);
-        }
+          return null;
+        })
+      );
+
+      if (isMounted) {
+        setFriends(fetched.filter(Boolean));
+        setLoading(false);
       }
-      setFriends(friendList);
-      setLoading(false);
     };
 
-    let snap1: any = null;
-    let snap2: any = null;
+    const unsubF1 = onSnapshot(
+      qFriends1,
+      (s) => {
+        docs1 = s.docs;
+        loaded1 = true;
+        void syncFriends();
+      },
+      (error) => {
+        loaded1 = true;
+        if (loaded2 && isMounted) setLoading(false);
+        handleFirestoreError(error, OperationType.LIST, 'friendships');
+      }
+    );
 
-    const unsubF1 = onSnapshot(qFriends1, (s) => {
-      snap1 = s;
-      if (snap2) fetchFriends(snap1, snap2);
-    }, (error) => handleFirestoreError(error, OperationType.LIST, 'friendships'));
-
-    const unsubF2 = onSnapshot(qFriends2, (s) => {
-      snap2 = s;
-      if (snap1) fetchFriends(snap1, snap2);
-    }, (error) => handleFirestoreError(error, OperationType.LIST, 'friendships'));
+    const unsubF2 = onSnapshot(
+      qFriends2,
+      (s) => {
+        docs2 = s.docs;
+        loaded2 = true;
+        void syncFriends();
+      },
+      (error) => {
+        loaded2 = true;
+        if (loaded1 && isMounted) setLoading(false);
+        handleFirestoreError(error, OperationType.LIST, 'friendships');
+      }
+    );
 
     return () => {
+      isMounted = false;
       unsubReq();
       unsubF1();
       unsubF2();

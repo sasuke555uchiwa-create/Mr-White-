@@ -1,10 +1,25 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { User, onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
-import { auth, db } from '../firebase';
+import {
+  doc,
+  getDoc,
+  onSnapshot,
+  serverTimestamp,
+  writeBatch,
+  Unsubscribe,
+} from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
+import { auth, db, functions } from '../firebase';
 import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHandler';
 
-interface UserProfile {
+export interface UserProfile {
   uid: string;
   displayName: string;
   photoURL: string;
@@ -26,90 +41,259 @@ interface AuthContextType {
   user: User | null;
   profile: UserProfile | null;
   loading: boolean;
+  isAdmin: boolean;
+  isOffline: boolean;
+  refreshProfile: () => Promise<void>;
+  refreshAdminStatus: () => Promise<boolean>;
 }
 
-const AuthContext = createContext<AuthContextType>({ user: null, profile: null, loading: true });
+const AuthContext = createContext<AuthContextType>({
+  user: null,
+  profile: null,
+  loading: true,
+  isAdmin: false,
+  isOffline: false,
+  refreshProfile: async () => {},
+  refreshAdminStatus: async () => false,
+});
 
 export const useAuth = () => useContext(AuthContext);
+
+const buildDefaultProfile = (currentUser: User): UserProfile => ({
+  uid: currentUser.uid,
+  displayName: (currentUser.displayName || 'لاعب جديد').slice(0, 50),
+  photoURL: currentUser.photoURL || '',
+  xp: 0,
+  level: 1,
+  stats: { wins: 0, hosted: 0, played: 0, longestStreak: 0 },
+  connectedAccounts: {
+    google: currentUser.providerData.some((p) => p.providerId === 'google.com'),
+    apple: currentUser.providerData.some((p) => p.providerId === 'apple.com'),
+  },
+});
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [isOffline, setIsOffline] = useState(() =>
+    typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
-        // Fetch or create profile
-        const userRef = doc(db, 'users', currentUser.uid);
+  const unsubProfileRef = useRef<Unsubscribe | null>(null);
+  const activeUidRef = useRef<string | null>(null);
+
+  const cleanupProfileListener = useCallback(() => {
+    if (unsubProfileRef.current) {
+      unsubProfileRef.current();
+      unsubProfileRef.current = null;
+    }
+  }, []);
+
+  const refreshAdminStatus = useCallback(async (): Promise<boolean> => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      setIsAdmin(false);
+      return false;
+    }
+
+    try {
+      const tokenRes = await currentUser.getIdTokenResult();
+      let claimAdmin = tokenRes.claims?.admin === true;
+
+      try {
+        const callable = httpsCallable<undefined, { isAdmin: boolean; shouldRefreshToken: boolean }>(
+          functions,
+          'checkAdminStatus'
+        );
+        const res = await callable();
+        if (res.data.shouldRefreshToken) {
+          const refreshed = await currentUser.getIdTokenResult(true);
+          claimAdmin = refreshed.claims?.admin === true;
+        }
+        const verified = Boolean(res.data.isAdmin || claimAdmin);
+        if (activeUidRef.current === currentUser.uid) {
+          setIsAdmin(verified);
+        }
+        return verified;
+      } catch {
+        // Fallback if Cloud Function is not deployed yet: verify read-only admins/{uid} doc + token claim
+        let docAdmin = false;
         try {
-          const docSnap = await getDoc(userRef);
-          if (!docSnap.exists()) {
-            const newProfile: UserProfile = {
-              uid: currentUser.uid,
-              displayName: currentUser.displayName || 'لاعب جديد',
-              photoURL: currentUser.photoURL || '',
+          const adminSnap = await getDoc(doc(db, 'admins', currentUser.uid));
+          docAdmin = adminSnap.exists() && adminSnap.data()?.active !== false;
+        } catch {
+          docAdmin = false;
+        }
+        const verified = Boolean(claimAdmin || docAdmin);
+        if (activeUidRef.current === currentUser.uid) {
+          setIsAdmin(verified);
+        }
+        return verified;
+      }
+    } catch {
+      if (activeUidRef.current === currentUser.uid) {
+        setIsAdmin(false);
+      }
+      return false;
+    }
+  }, []);
+
+  const ensureAndSyncProfile = useCallback(async (currentUser: User) => {
+    const uid = currentUser.uid;
+    const userRef = doc(db, 'users', uid);
+    const publicRef = doc(db, 'publicProfiles', uid);
+
+    try {
+      const [userSnap, publicSnap] = await Promise.all([getDoc(userRef), getDoc(publicRef)]);
+      if (activeUidRef.current !== uid) return;
+
+      if (!userSnap.exists()) {
+        const defaultProf = buildDefaultProfile(currentUser);
+        const batch = writeBatch(db);
+        batch.set(userRef, {
+          ...defaultProf,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        if (!publicSnap.exists()) {
+          batch.set(publicRef, {
+            uid,
+            displayName: defaultProf.displayName,
+            photoURL: defaultProf.photoURL,
+            xp: 0,
+            level: 1,
+            stats: defaultProf.stats,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        try {
+          await batch.commit();
+        } catch (writeErr) {
+          console.warn('Could not save initial profile documents, using local copy:', writeErr);
+        }
+        if (activeUidRef.current === uid) {
+          setProfile(defaultProf);
+        }
+      } else {
+        const userData = userSnap.data() as UserProfile;
+        if (!publicSnap.exists()) {
+          try {
+            const batch = writeBatch(db);
+            batch.set(publicRef, {
+              uid,
+              displayName: (userData.displayName || 'لاعب جديد').slice(0, 50),
+              photoURL: userData.photoURL || '',
               xp: 0,
               level: 1,
               stats: { wins: 0, hosted: 0, played: 0, longestStreak: 0 },
-              connectedAccounts: {
-                google: currentUser.providerData.some(p => p.providerId === 'google.com'),
-                apple: currentUser.providerData.some(p => p.providerId === 'apple.com')
-              }
-            };
-            try {
-              await setDoc(userRef, newProfile);
-            } catch (e) {
-              console.warn("Could not save new profile to server, using local copy", e);
-            }
-            setProfile(newProfile);
-          } else {
-            setProfile(docSnap.data() as UserProfile);
-          }
-        } catch (error: any) {
-          if (error.message?.includes('offline') || error.message?.includes('network')) {
-            console.warn("Client is offline, creating temporary local profile...");
-            setProfile({
-              uid: currentUser.uid,
-              displayName: currentUser.displayName || 'لاعب جديد',
-              photoURL: currentUser.photoURL || '',
-              xp: 0,
-              level: 1,
-              stats: { wins: 0, hosted: 0, played: 0, longestStreak: 0 },
-              connectedAccounts: { google: true, apple: false }
+              updatedAt: serverTimestamp(),
             });
-          } else {
-            handleFirestoreError(error, OperationType.GET, `users/${currentUser.uid}`);
+            await batch.commit();
+          } catch {
+            // Non-blocking sync fallback
           }
         }
-
-        // Listen for profile changes
-        const unsubProfile = onSnapshot(userRef, (doc) => {
-          if (doc.exists()) {
-            setProfile(doc.data() as UserProfile);
-          }
-        }, (error) => {
-           console.warn("Profile snapshot error:", error);
-           // We don't throw here for offline errors to avoid crashing during gameplay
-           if (!error.message?.includes('offline')) {
-             handleFirestoreError(error, OperationType.GET, `users/${currentUser.uid}`);
-           }
-        });
-
-        setLoading(false);
-        return () => unsubProfile();
+        if (activeUidRef.current === uid) {
+          setProfile(userData);
+        }
+      }
+    } catch (error: any) {
+      if (activeUidRef.current !== uid) return;
+      if (error?.message?.includes('offline') || error?.message?.includes('network')) {
+        setIsOffline(true);
+        setProfile(buildDefaultProfile(currentUser));
       } else {
+        handleFirestoreError(error, OperationType.GET, `users/${uid}`);
+      }
+    }
+  }, []);
+
+  const refreshProfile = useCallback(async () => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) return;
+    await ensureAndSyncProfile(currentUser);
+  }, [ensureAndSyncProfile]);
+
+  useEffect(() => {
+    const onOnline = () => setIsOffline(false);
+    const onOffline = () => setIsOffline(true);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+      // Always tear down previous user's Firestore subscription before handling account switch/logout
+      cleanupProfileListener();
+
+      if (!currentUser) {
+        activeUidRef.current = null;
+        setUser(null);
         setProfile(null);
+        setIsAdmin(false);
+        setLoading(false);
+        return;
+      }
+
+      const targetUid = currentUser.uid;
+      activeUidRef.current = targetUid;
+      setUser(currentUser);
+      setProfile(null);
+      setLoading(true);
+
+      await Promise.all([ensureAndSyncProfile(currentUser), refreshAdminStatus()]);
+
+      if (activeUidRef.current !== targetUid) {
+        return;
+      }
+
+      const userRef = doc(db, 'users', targetUid);
+      unsubProfileRef.current = onSnapshot(
+        userRef,
+        (docSnap) => {
+          if (activeUidRef.current !== targetUid) return;
+          if (docSnap.exists()) {
+            setProfile(docSnap.data() as UserProfile);
+          }
+        },
+        (error) => {
+          if (activeUidRef.current !== targetUid) return;
+          console.warn('Profile snapshot error:', error);
+          if (!error.message?.includes('offline')) {
+            handleFirestoreError(error, OperationType.GET, `users/${targetUid}`);
+          }
+        }
+      );
+
+      if (activeUidRef.current === targetUid) {
         setLoading(false);
       }
     });
 
-    return () => unsubscribe();
-  }, []);
+    return () => {
+      cleanupProfileListener();
+      unsubscribeAuth();
+    };
+  }, [cleanupProfileListener, ensureAndSyncProfile, refreshAdminStatus]);
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        profile,
+        loading,
+        isAdmin,
+        isOffline,
+        refreshProfile,
+        refreshAdminStatus,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../contexts/AuthContext';
 import { Avatar } from './Avatar';
 import { playSound } from '../services/soundService';
-import heroBanner from '../src/assets/images/undercover_hero_banner_1794518485440.jpg';
+import heroBanner from '../src/assets/images/undercover_hero_banner_1794518485440.webp';
 
 interface WelcomeScreenProps {
   onStart: () => void;

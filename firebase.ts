@@ -1,17 +1,45 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut } from 'firebase/auth';
-import { initializeFirestore } from 'firebase/firestore';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  signOut,
+} from 'firebase/auth';
+import { doc, getDocFromServer, initializeFirestore } from 'firebase/firestore';
+import { getFunctions } from 'firebase/functions';
 import firebaseConfig from './firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = initializeFirestore(app, {
-  experimentalForceLongPolling: true
-}, firebaseConfig.firestoreDatabaseId);
+export const db = initializeFirestore(
+  app,
+  {
+    experimentalForceLongPolling: true,
+  },
+  firebaseConfig.firestoreDatabaseId
+);
+export const functions = getFunctions(app);
 export const googleProvider = new GoogleAuthProvider();
 
+export async function testConnection(): Promise<boolean> {
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.warn('Firestore appears offline or unreachable.');
+      return false;
+    }
+    return true;
+  }
+}
+
+void testConnection();
+
 export const signInWithGoogle = () => {
-  return signInWithPopup(auth, googleProvider).then(result => result.user);
+  return signInWithPopup(auth, googleProvider).then((result) => result.user);
 };
 
 export const signInWithGoogleRedirect = () => {
@@ -26,7 +54,7 @@ export const logOut = async () => {
   try {
     await signOut(auth);
   } catch (error) {
-    console.error("Error signing out", error);
+    console.error('Error signing out', error);
     throw error;
   }
 };

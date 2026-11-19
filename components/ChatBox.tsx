@@ -43,13 +43,7 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
 
     setSending(true);
     try {
-      await appendRoomChatMessage(roomId, {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        senderId: currentUser.uid,
-        senderName: currentProfile?.displayName || currentUser.displayName || getUITranslation(lang, 'newPlayer'),
-        text: trimmed.slice(0, 200),
-        timestamp: new Date().toISOString(),
-      });
+      await appendRoomChatMessage(roomId, trimmed.slice(0, 200));
       setMessageText('');
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);

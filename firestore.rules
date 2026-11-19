@@ -1,90 +1,244 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 0. Default Deny
+    // 0. Global Default Deny Catch-All
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // --- Helpers ---
-    function isSignedIn() { return request.auth != null; }
-    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
-    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
-    function incoming() { return request.resource.data; }
-    function existing() { return resource.data; }
-    
+    // --- Primitive Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidCompositeId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 257 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email_verified == true && request.auth.token.email == 'sasuke555uchiwa@gmail.com')
+      );
+    }
+
+    function isRoomMember(roomId) {
+      return exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+             get(/databases/$(database)/documents/rooms/$(roomId)).data.playerIds is list &&
+             request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.playerIds;
+    }
+
+    function isRoomHostOrMember(roomId) {
+      return exists(/databases/$(database)/documents/rooms/$(roomId)) && (
+        get(/databases/$(database)/documents/rooms/$(roomId)).data.hostId == request.auth.uid ||
+        (
+          get(/databases/$(database)/documents/rooms/$(roomId)).data.playerIds is list &&
+          request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.playerIds
+        )
+      );
+    }
+
     // --- Validation Blueprints ---
-    
-    function isValidUser(data) {
-      return data.uid == request.auth.uid &&
+    function isZeroStatsMap(s) {
+      return s is map &&
+             s.keys().hasAll(['wins', 'hosted', 'played', 'longestStreak']) &&
+             s.keys().hasOnly(['wins', 'hosted', 'played', 'longestStreak']) &&
+             s.wins == 0 &&
+             s.hosted == 0 &&
+             s.played == 0 &&
+             s.longestStreak == 0;
+    }
+
+    function isValidStatsMap(s) {
+      return s is map &&
+             s.keys().hasAll(['wins', 'hosted', 'played', 'longestStreak']) &&
+             s.keys().hasOnly(['wins', 'hosted', 'played', 'longestStreak']) &&
+             s.wins is number && s.wins >= 0 &&
+             s.hosted is number && s.hosted >= 0 &&
+             s.played is number && s.played >= 0 &&
+             s.longestStreak is number && s.longestStreak >= 0;
+    }
+
+    function isValidConnectedAccounts(ca) {
+      return ca is map &&
+             ca.keys().hasAll(['google', 'apple']) &&
+             ca.keys().hasOnly(['google', 'apple']) &&
+             ca.google is bool &&
+             ca.apple is bool;
+    }
+
+    function isValidUserCreate(data) {
+      return isValidId(data.uid) &&
+             data.uid == request.auth.uid &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+             data.photoURL is string && data.photoURL.size() <= 2097152 &&
+             data.xp == 0 &&
+             data.level == 1 &&
+             isZeroStatsMap(data.stats) &&
+             isValidConnectedAccounts(data.connectedAccounts) &&
+             data.createdAt == request.time &&
+             data.updatedAt == request.time &&
+             data.keys().hasAll(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'connectedAccounts', 'createdAt', 'updatedAt']) &&
+             data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'connectedAccounts', 'createdAt', 'updatedAt']);
+    }
+
+    function isValidUserUpdate(data) {
+      return isValidId(data.uid) &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
              data.photoURL is string && data.photoURL.size() <= 2097152 &&
              data.xp is number && data.xp >= 0 &&
              data.level is number && data.level >= 1 &&
-             data.keys().hasAll(['uid', 'displayName', 'xp', 'level']) &&
-             data.keys().size() <= 10;
+             isValidStatsMap(data.stats) &&
+             isValidConnectedAccounts(data.connectedAccounts) &&
+             data.keys().hasAll(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'connectedAccounts']) &&
+             data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'connectedAccounts', 'createdAt', 'updatedAt']);
     }
 
-    function isValidRoom(data) {
-      return data.hostId is string && data.hostId.size() <= 128 &&
-             data.status in ['waiting', 'playing', 'finished'] &&
-             data.maxPlayers is number && data.maxPlayers >= 3 && data.maxPlayers <= 12 &&
-             data.players is list && data.players.size() <= data.maxPlayers &&
-             data.keys().hasAll(['hostId', 'status', 'maxPlayers', 'players']) &&
-             (!('category' in data) || (data.category is string && data.category.size() <= 32)) &&
-             (!('difficulty' in data) || data.difficulty in ['easy', 'hard']) &&
-             (!('turnDurationSeconds' in data) || (data.turnDurationSeconds is number && data.turnDurationSeconds >= 15 && data.turnDurationSeconds <= 180)) &&
-             (!('mrWhiteCount' in data) || (data.mrWhiteCount is number && data.mrWhiteCount >= 1 && data.mrWhiteCount <= 2)) &&
-             (!('undercoverCount' in data) || (data.undercoverCount is number && data.undercoverCount >= 0 && data.undercoverCount <= 3)) &&
-             (!('gameState' in data) || data.gameState is map) &&
-             data.keys().size() <= 22;
+    function isValidPublicProfileCreate(data) {
+      return isValidId(data.uid) &&
+             data.uid == request.auth.uid &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+             data.photoURL is string && data.photoURL.size() <= 2097152 &&
+             data.xp == 0 &&
+             data.level == 1 &&
+             isZeroStatsMap(data.stats) &&
+             data.updatedAt == request.time &&
+             data.keys().hasAll(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'updatedAt']) &&
+             data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'updatedAt']);
     }
 
-    // --- Rules ---
+    function isValidPublicProfileUpdate(data) {
+      return isValidId(data.uid) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+             data.photoURL is string && data.photoURL.size() <= 2097152 &&
+             data.xp is number && data.xp >= 0 &&
+             data.level is number && data.level >= 1 &&
+             isValidStatsMap(data.stats) &&
+             data.keys().hasAll(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'updatedAt']) &&
+             data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'updatedAt']);
+    }
 
+    // --- Collection Rules ---
+
+    // 1. Private User PII & Profile
     match /users/{userId} {
-      allow read: if isSignedIn();
-      allow create: if isVerified() && isValidId(userId) && userId == request.auth.uid && isValidUser(incoming());
-      allow update: if isVerified() && isValidId(userId) && userId == request.auth.uid && isValidUser(incoming()) &&
-                    incoming().uid == existing().uid; // Immutable UID
-    }
-
-    match /rooms/{roomId} {
-      allow read: if isSignedIn();
-      allow create: if isVerified() && isValidId(roomId) && incoming().hostId == request.auth.uid && isValidRoom(incoming());
-      
-      allow update: if isVerified() && isValidId(roomId) && 
-                    existing().status != 'finished' && // Terminal State Locking
-                    isValidRoom(incoming()) && (
-        // Action: Host Update (Full control keeping hostId)
-        (request.auth.uid == existing().hostId && incoming().hostId == existing().hostId) ||
-        // Action: Host Migration or Manual Transfer (Current host transfers ownership on leave or promotes a remaining player)
-        (request.auth.uid == existing().hostId &&
-         incoming().diff(existing()).affectedKeys().hasOnly(['hostId', 'hostName', 'hostAvatar', 'players']) &&
-         incoming().players.size() > 0 &&
-         incoming().players.size() <= existing().players.size()) ||
-        // Action: Player Join/Ready/Vote/Chat (Restricted keys & no late join while playing)
-        (incoming().diff(existing()).affectedKeys().hasOnly(['players', 'gameState', 'messages']) &&
-         incoming().hostId == existing().hostId &&
-         incoming().status == existing().status &&
-         (existing().status == 'waiting' || incoming().players.size() <= existing().players.size()) &&
-         (!('kickedPlayers' in existing()) || !(request.auth.uid in existing().kickedPlayers) || incoming().players.size() <= existing().players.size()))
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if false;
+      allow create: if isVerified() && isValidId(userId) && request.auth.uid == userId && isValidUserCreate(incoming());
+      allow update: if isVerified() && isValidId(userId) && isValidUserUpdate(incoming()) && (
+        isAdmin() ||
+        (
+          request.auth.uid == userId &&
+          incoming().uid == existing().uid &&
+          incoming().xp == existing().xp &&
+          incoming().level == existing().level &&
+          incoming().stats == existing().stats &&
+          (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'connectedAccounts', 'updatedAt'])
+        )
       );
-
-      allow delete: if isVerified() && request.auth.uid == existing().hostId;
+      allow delete: if false;
     }
 
+    // 2. Public Profiles (Leaderboard, Friends, Opponent Stats)
+    match /publicProfiles/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn() && existing().uid is string;
+      allow create: if isVerified() && isValidId(userId) && request.auth.uid == userId && isValidPublicProfileCreate(incoming());
+      allow update: if isVerified() && isValidId(userId) && isValidPublicProfileUpdate(incoming()) && (
+        isAdmin() ||
+        (
+          request.auth.uid == userId &&
+          incoming().uid == existing().uid &&
+          incoming().xp == existing().xp &&
+          incoming().level == existing().level &&
+          incoming().stats == existing().stats &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt'])
+        )
+      );
+      allow delete: if false;
+    }
+
+    // 3. Admins (Read own record only; mutations Admin SDK / Console only)
+    match /admins/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow list, write: if false;
+    }
+
+    // 4. Server-Only Room Invite Lookup
+    match /roomCodes/{code} {
+      allow read, write: if false;
+    }
+
+    // 5. Public Rooms (Read-only for clients; all mutations via Cloud Functions)
+    match /rooms/{roomId} {
+      allow get: if isSignedIn() && isValidId(roomId) && (
+        existing().hostId == request.auth.uid ||
+        (existing().playerIds is list && request.auth.uid in existing().playerIds) ||
+        (existing().isPrivate == false && existing().status == 'waiting')
+      );
+      allow list: if isSignedIn() && existing().isPrivate == false && existing().status == 'waiting';
+      allow create, update, delete: if false;
+
+      // 5a. Player Private Role & Secret Word (Owner + Parent Room Member Gate)
+      match /privatePlayers/{playerUid} {
+        allow get: if isSignedIn() && isValidId(roomId) && isValidId(playerUid) &&
+                   request.auth.uid == playerUid &&
+                   isRoomMember(roomId);
+        allow list, write: if false;
+      }
+
+      // 5b. Room Invite Secret Code (Members & Host Only)
+      match /privateMeta/{docId} {
+        allow get: if isSignedIn() && isValidId(roomId) && isValidId(docId) &&
+                   isRoomHostOrMember(roomId);
+        allow list, write: if false;
+      }
+
+      // 5c. Server-Only Private Game State (Words, All Roles, Live Votes, Settlement Guard)
+      match /privateState/{docId} {
+        allow read, write: if false;
+      }
+    }
+
+    // 6. Friend Requests (Reads restricted to sender/receiver; mutations via Cloud Functions)
     match /friendRequests/{requestId} {
-      allow read: if isVerified() && (request.auth.uid == existing().fromId || request.auth.uid == existing().toId);
-      allow create: if isVerified() && isValidId(requestId) && incoming().fromId == request.auth.uid;
-      allow update: if isVerified() && request.auth.uid == existing().toId && incoming().diff(existing()).affectedKeys().hasOnly(['status']);
-      allow delete: if isVerified() && (request.auth.uid == existing().fromId || request.auth.uid == existing().toId);
+      allow get: if isSignedIn() && isValidCompositeId(requestId) && (
+        existing().fromId == request.auth.uid || existing().toId == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        existing().fromId == request.auth.uid || existing().toId == request.auth.uid
+      );
+      allow create, update, delete: if false;
     }
 
+    // 7. Friendships (Reads restricted to participants; mutations via Cloud Functions)
     match /friendships/{friendshipId} {
-      allow read: if isVerified() && (request.auth.uid == existing().user1 || request.auth.uid == existing().user2);
-      allow create: if isVerified() && isValidId(friendshipId) && (request.auth.uid == incoming().user1 || request.auth.uid == incoming().user2);
-      allow delete: if isVerified() && (request.auth.uid == existing().user1 || request.auth.uid == existing().user2);
+      allow get: if isSignedIn() && isValidCompositeId(friendshipId) && (
+        existing().user1 == request.auth.uid || existing().user2 == request.auth.uid
+      );
+      allow list: if isSignedIn() && (
+        existing().user1 == request.auth.uid || existing().user2 == request.auth.uid
+      );
+      allow create, update, delete: if false;
     }
   }
 }

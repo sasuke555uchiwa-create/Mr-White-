@@ -18,11 +18,11 @@ import { GameMode, GameSettings, SpecialRoleId } from '../types';
 import { SPECIAL_ROLES } from '../data/specialRoles';
 import { motion, AnimatePresence } from 'framer-motion';
 import { playSound } from '../services/soundService';
-import deckStandard from '../src/assets/images/deck_standard_1794518487240.jpg';
-import deckAnimals from '../src/assets/images/deck_animals_1794518487227.jpg';
-import deckFood from '../src/assets/images/deck_food_1794518490972.jpg';
-import deckPlaces from '../src/assets/images/deck_places_1794601446339.jpg';
-import deckObjects from '../src/assets/images/deck_objects_1794601445993.jpg';
+import deckStandard from '../src/assets/images/deck_standard_1794518487240.webp';
+import deckAnimals from '../src/assets/images/deck_animals_1794518487227.webp';
+import deckFood from '../src/assets/images/deck_food_1794518490972.webp';
+import deckPlaces from '../src/assets/images/deck_places_1794601446339.webp';
+import deckObjects from '../src/assets/images/deck_objects_1794601445993.webp';
 
 interface GameSettingsScreenProps {
   playersCount: number;
@@ -389,6 +389,7 @@ export const GameSettingsScreen: React.FC<GameSettingsScreenProps> = ({
                       <img
                         src={cat.cover}
                         alt={cat.title}
+                        loading="lazy"
                         referrerPolicy="no-referrer"
                         className="w-full h-full object-cover"
                       />
@@ -595,6 +596,7 @@ export const GameSettingsScreen: React.FC<GameSettingsScreenProps> = ({
                             <img
                               src={role.image}
                               alt={role.names[lang] || role.names.en}
+                              loading="lazy"
                               referrerPolicy="no-referrer"
                               className="w-full h-full object-contain"
                             />

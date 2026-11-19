@@ -4,7 +4,7 @@ import { signInWithGoogle, signInWithGoogleRedirect, handleRedirectResult, logOu
 import { motion } from 'framer-motion';
 import { ArrowRight, Edit2, Award, Flame, CheckCircle, Circle, Image as ImageIcon, RefreshCw, AlertCircle } from 'lucide-react';
 
-import { doc, updateDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { db } from '../firebase';
 import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHandler';
 
@@ -76,15 +76,30 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onBack }) => {
   };
 
   const handleSaveProfile = async () => {
-    if (!user || !profile || !editName.trim()) return;
-    
+    const trimmedName = editName.trim().slice(0, 50);
+    if (!user || !profile || !trimmedName) return;
+
     setIsSaving(true);
     try {
+      const batch = writeBatch(db);
       const userRef = doc(db, 'users', user.uid);
-      await updateDoc(userRef, {
-        displayName: editName.trim(),
-        photoURL: editAvatar
+      const publicRef = doc(db, 'publicProfiles', user.uid);
+      batch.update(userRef, {
+        displayName: trimmedName,
+        photoURL: editAvatar,
+        updatedAt: serverTimestamp(),
       });
+      batch.set(
+        publicRef,
+        {
+          uid: user.uid,
+          displayName: trimmedName,
+          photoURL: editAvatar,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      await batch.commit();
       setIsEditing(false);
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);

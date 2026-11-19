@@ -1,6 +1,6 @@
 import { PlayerRole, SpecialRoleId } from '../types';
-import mrJusticeImg from '../src/assets/images/mr_justice_role_1794638995803.jpg';
-import mrAvengerImg from '../src/assets/images/mr_avenger_role_1794638995374.jpg';
+import mrJusticeImg from '../src/assets/images/mr_justice_role_1794638995803.webp';
+import mrAvengerImg from '../src/assets/images/mr_avenger_role_1794638995374.webp';
 
 export interface SpecialRoleDefinition {
   id: SpecialRoleId;

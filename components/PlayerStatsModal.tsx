@@ -37,7 +37,7 @@ export const PlayerStatsModal: React.FC<PlayerStatsModalProps> = ({
       setLoading(true);
       const fetchProfile = async () => {
         try {
-          const userRef = doc(db, 'users', uid);
+          const userRef = doc(db, 'publicProfiles', uid);
           const docSnap = await getDoc(userRef);
           if (docSnap.exists()) {
             setProfile(docSnap.data());

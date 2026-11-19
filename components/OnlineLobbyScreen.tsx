@@ -1,9 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { doc, onSnapshot, updateDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
-import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
-import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHandler';
-import { leaveOnlineRoom } from '../utils/onlineRoomService';
+import { useOnlineRoom } from '../hooks/useOnlineRoom';
+import {
+  beginOnlineMatch,
+  joinOnlineRoom,
+  kickOnlinePlayer,
+  leaveOnlineRoom,
+  promoteOnlineHost,
+  toggleOnlineReady,
+  updateOnlineRoomSettings,
+} from '../utils/onlineRoomService';
 import { motion } from 'framer-motion';
 import {
   ArrowRight,
@@ -44,7 +50,6 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
   onStartGame,
 }) => {
   const { user, profile } = useAuth();
-  const [room, setRoom] = useState<any>(null);
   const [copied, setCopied] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [showEditSettings, setShowEditSettings] = useState(false);
@@ -57,7 +62,8 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
     isPrivate: false,
   });
   const isLeavingRef = useRef(false);
-  const prevHostIdRef = useRef<string | null>(null);
+  const joinAttemptedRef = useRef(false);
+  const [busyAction, setBusyAction] = useState(false);
 
   const settings = getSettings();
   const isRTL = ['ar', 'sa'].includes(settings.language);
@@ -71,114 +77,64 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
     return text;
   };
 
-  useEffect(() => {
-    if (!roomId || !user) return;
-
-    const roomRef = doc(db, 'rooms', roomId);
-    const unsubscribe = onSnapshot(
-      roomRef,
-      (docSnap) => {
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          if (
-            prevHostIdRef.current &&
-            prevHostIdRef.current !== data.hostId &&
-            data.hostId === user.uid
-          ) {
-            showToast(t('hostPromoted'), 'info');
-          }
-          prevHostIdRef.current = data.hostId;
-          setRoom(data);
-
-          if (data.status === 'playing' && data.gameState) {
-            onStartGame(data);
-          }
-        } else {
-          if (!isLeavingRef.current) {
-            showToast(t('roomClosedByHost'), 'warning');
-            onBack();
-          }
-        }
-      },
-      (error) => {
-        handleFirestoreError(error, OperationType.GET, `rooms/${roomId}`);
-      }
-    );
-
-    return () => unsubscribe();
-  }, [roomId, user, onBack, onStartGame]);
-
-  // Handle Offline cleanly
-  useEffect(() => {
-    const handleOffline = async () => {
-      if (isLeavingRef.current) return;
-      showToast(t('lostConnection'), 'error');
-
-      if (room && user) {
-        isLeavingRef.current = true;
-        try {
-          await leaveOnlineRoom(roomId, user.uid);
-        } catch (e) {
-          console.error('Offline leave error', e);
-        }
-      }
+  const { room, inviteMeta } = useOnlineRoom({
+    roomId,
+    user,
+    isLeavingRef,
+    subscribeInviteMeta: true,
+    onRoomClosed: () => {
+      showToast(t('roomClosedByHost'), 'warning');
       onBack();
-    };
-
-    window.addEventListener('offline', handleOffline);
-    return () => window.removeEventListener('offline', handleOffline);
-  }, [room, user, roomId, onBack]);
-
-  // Join room on mount if not already in it
-  useEffect(() => {
-    if (!room || !user || !profile || isLeavingRef.current) return;
-
-    if (room.kickedPlayers?.includes(user.uid)) {
+    },
+    onKicked: () => {
       showToast(t('kickedFromRoom'), 'error');
-      isLeavingRef.current = true;
       onBack();
-      return;
-    }
+    },
+    onHostPromoted: () => {
+      showToast(t('hostPromoted'), 'info');
+    },
+    onOfflineLeave: () => {
+      showToast(t('lostConnection'), 'error');
+      onBack();
+    },
+  });
 
+  useEffect(() => {
+    if (!room || !user || isLeavingRef.current) return;
+    if (room.status === 'playing' && room.gameState) {
+      onStartGame(room);
+    }
+  }, [room, user, onStartGame]);
+
+  // Safety join if navigated directly to lobby before joinRoom completed
+  useEffect(() => {
+    if (!room || !user || isLeavingRef.current || joinAttemptedRef.current) return;
     const currentPlayers: any[] = room.players || [];
     const isPlayerInRoom = currentPlayers.some((p: any) => p.uid === user.uid);
+    if (isPlayerInRoom) return;
 
-    if (room.status === 'playing' && !isPlayerInRoom) {
-      showToast(t('roomFull'), 'warning');
-      isLeavingRef.current = true;
-      onBack();
-      return;
-    }
-
-    if (!isPlayerInRoom && currentPlayers.length < (room.maxPlayers || 8)) {
-      const joinRoom = async () => {
-        try {
-          const roomRef = doc(db, 'rooms', roomId);
-          await updateDoc(roomRef, {
-            players: arrayUnion({
-              uid: user.uid,
-              name: profile.displayName || t('newPlayer'),
-              avatar:
-                profile.photoURL ||
-                `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.uid}`,
-              isReady: false,
-              isImpostor: false,
-              isEliminated: false,
-              score: 0,
-              vote: null,
-            }),
-          });
-        } catch (error) {
-          handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+    joinAttemptedRef.current = true;
+    joinOnlineRoom({ roomId })
+      .then((res) => {
+        if (!res.success && !isLeavingRef.current) {
+          isLeavingRef.current = true;
+          const msgKey =
+            res.reason === 'kickedFromRoom'
+              ? 'kickedFromRoom'
+              : res.reason === 'roomFull' || res.reason === 'matchAlreadyStarted'
+              ? 'roomFull'
+              : 'roomNotFound';
+          showToast(t(msgKey), 'warning');
+          onBack();
         }
-      };
-      joinRoom();
-    } else if (!isPlayerInRoom && currentPlayers.length >= (room.maxPlayers || 8)) {
-      showToast(t('roomFull'), 'warning');
-      isLeavingRef.current = true;
-      onBack();
-    }
-  }, [room, user, profile, roomId, onBack]);
+      })
+      .catch(() => {
+        if (!isLeavingRef.current) {
+          isLeavingRef.current = true;
+          onBack();
+        }
+      });
+  }, [room, user, roomId, onBack]);
 
   const handleLeave = async () => {
     if (!room || !user || isLeavingRef.current) return;
@@ -186,68 +142,63 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
     try {
       await leaveOnlineRoom(roomId, user.uid);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+      console.error('Failed to leave room cleanly:', error);
     } finally {
       onBack();
     }
   };
 
   const handleKickPlayer = async (playerId: string) => {
-    if (!room || !user || room.hostId !== user.uid) return;
+    if (!room || !user || room.hostId !== user.uid || busyAction) return;
+    setBusyAction(true);
     try {
-      const roomRef = doc(db, 'rooms', roomId);
-      const playerObj = room.players.find((p: any) => p.uid === playerId);
-      if (playerObj) {
-        await updateDoc(roomRef, {
-          players: arrayRemove(playerObj),
-          kickedPlayers: arrayUnion(playerId),
-        });
-      }
+      await kickOnlinePlayer(roomId, playerId);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+      console.error('Kick failed:', error);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
     }
   };
 
   const handlePromoteHost = async (targetPlayer: any) => {
-    if (!room || !user || room.hostId !== user.uid || targetPlayer.uid === user.uid) return;
+    if (!room || !user || room.hostId !== user.uid || targetPlayer.uid === user.uid || busyAction) {
+      return;
+    }
+    setBusyAction(true);
     try {
-      const roomRef = doc(db, 'rooms', roomId);
-      await updateDoc(roomRef, {
-        hostId: targetPlayer.uid,
-        hostName: targetPlayer.name,
-        hostAvatar: targetPlayer.avatar,
-        players: room.players,
-      });
+      await promoteOnlineHost(roomId, targetPlayer.uid);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+      console.error('Promote host failed:', error);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
     }
   };
 
   const handleToggleReady = async () => {
-    if (!room || !user) return;
+    if (!room || !user || busyAction) return;
+    setBusyAction(true);
     try {
-      const roomRef = doc(db, 'rooms', roomId);
-      const updatedPlayers = room.players.map((p: any) =>
-        p.uid === user.uid ? { ...p, isReady: !p.isReady } : p
-      );
-      await updateDoc(roomRef, { players: updatedPlayers });
+      await toggleOnlineReady(roomId);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+      console.error('Toggle ready failed:', error);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
     }
   };
 
   const handleStartGame = async () => {
-    if (!room || !user || room.hostId !== user.uid) return;
+    if (!room || !user || room.hostId !== user.uid || busyAction) return;
+    setBusyAction(true);
     try {
-      const roomRef = doc(db, 'rooms', roomId);
-      await updateDoc(roomRef, {
-        status: 'playing',
-        gameState: {
-          phase: 'SETUP_PENDING',
-        },
-      });
+      await beginOnlineMatch(roomId);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+      console.error('Begin match failed:', error);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
     }
   };
 
@@ -257,10 +208,12 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
     showToast(t(result.message), result.success ? 'success' : 'info');
   };
 
+  const roomSecretCode = inviteMeta?.secretCode || room?.secretCode || '------';
+
   const copyCode = async () => {
-    if (!room?.secretCode) return;
+    if (!inviteMeta?.secretCode && !room?.secretCode) return;
     try {
-      await navigator.clipboard.writeText(room.secretCode);
+      await navigator.clipboard.writeText(roomSecretCode);
       setCopied(true);
       showToast(t('codeCopied'), 'success');
       setTimeout(() => setCopied(false), 2000);
@@ -270,8 +223,8 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
   };
 
   const shareRoom = async () => {
-    if (!room?.secretCode) return;
-    const shareText = `${t('roomCodeLabel')}: ${room.secretCode}`;
+    if (!inviteMeta?.secretCode && !room?.secretCode) return;
+    const shareText = `${t('roomCodeLabel')}: ${roomSecretCode}`;
     if (navigator.share) {
       try {
         await navigator.share({ title: 'Undercover', text: shareText });
@@ -297,11 +250,12 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
   };
 
   const saveEditSettings = async () => {
-    if (!room || !user || room.hostId !== user.uid) return;
+    if (!room || !user || room.hostId !== user.uid || busyAction) return;
     const minAllowed = Math.max(3, room.players?.length || 3);
     const safeMax = Math.max(minAllowed, Math.min(10, editDraft.maxPlayers));
+    setBusyAction(true);
     try {
-      await updateDoc(doc(db, 'rooms', roomId), {
+      await updateOnlineRoomSettings(roomId, {
         maxPlayers: safeMax,
         language: editDraft.language,
         category: editDraft.category,
@@ -311,7 +265,10 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
       });
       setShowEditSettings(false);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+      console.error('Update room settings failed:', error);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setBusyAction(false);
     }
   };
 
@@ -381,7 +338,7 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
               {t('roomCodeLabel')}
             </p>
             <p className="text-2xl font-black tracking-widest drop-shadow-sm text-primary tabular-nums" dir="ltr">
-              {room.secretCode}
+              {roomSecretCode}
             </p>
           </div>
           <button

@@ -11,7 +11,7 @@ import {
   getRoleTitle,
   getSpecialRoleDescription,
 } from '../data/specialRoles';
-import mysteryCardBack from '../src/assets/images/mystery_card_back_1794601444252.jpg';
+import mysteryCardBack from '../src/assets/images/mystery_card_back_1794601444252.webp';
 
 interface GameRoundProps {
   players: Player[];

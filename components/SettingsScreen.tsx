@@ -8,6 +8,7 @@ import {
 } from '../services/storageService';
 import { playSound, SOUND_EFFECT_LIST, SoundType } from '../services/soundService';
 import { getUITranslation } from '../translations';
+import { useAuth } from '../contexts/AuthContext';
 import {
   Settings,
   Globe,
@@ -20,7 +21,7 @@ import {
   PaintBucket,
   Shield,
   CheckCircle,
-  XCircle,
+  RefreshCw,
 } from 'lucide-react';
 
 interface SettingsScreenProps {
@@ -42,17 +43,16 @@ const LANGUAGES = [
   { id: 'pt', labelKey: 'portuguese', symbol: 'PT', color: 'bg-emerald-600' },
 ];
 
-const ADMIN_CODE = 'ADMIN777';
-
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   onBack,
   onThemeChange,
   onButtonColorChange,
   onLanguageChange,
 }) => {
+  const { user, isAdmin, refreshAdminStatus } = useAuth();
   const [settings, setSettings] = useState<AppSettings>(getSettings());
-  const [adminCodeInput, setAdminCodeInput] = useState('');
-  const [adminStatus, setAdminStatus] = useState<null | 'success' | 'error'>(null);
+  const [checkingAdmin, setCheckingAdmin] = useState(false);
+  const [adminCheckMessage, setAdminCheckMessage] = useState<string | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<null | 'scores' | 'all'>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [activePreviewSound, setActivePreviewSound] = useState<SoundType | null>(null);
@@ -85,7 +85,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   };
 
   const handleLanguageChange = (newLang: string) => {
-    const newSettings = { ...settings, language: newLang as any };
+    const newSettings = { ...settings, language: newLang };
     setSettings(newSettings);
     saveSettings(newSettings);
     playSound('click');
@@ -125,18 +125,22 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
     }
   };
 
-  const handleVerifyAdmin = () => {
-    if (adminCodeInput.trim() === ADMIN_CODE) {
-      setAdminStatus('success');
-      const newSettings = { ...settings, isAdmin: true };
-      setSettings(newSettings);
-      saveSettings(newSettings);
-      playSound('click');
-      setTimeout(() => setAdminStatus(null), 3000);
-    } else {
-      setAdminStatus('error');
-      playSound('error');
-      setTimeout(() => setAdminStatus(null), 3000);
+  const handleRefreshAdmin = async () => {
+    if (checkingAdmin) return;
+    setCheckingAdmin(true);
+    setAdminCheckMessage(null);
+    try {
+      const granted = await refreshAdminStatus();
+      playSound(granted ? 'click' : 'error');
+      setAdminCheckMessage(
+        granted
+          ? t('adminSuccess')
+          : lang === 'ar'
+          ? 'هذا الحساب لا يملك صلاحية إدارة من الخادم.'
+          : 'This account does not have server-granted admin permissions.'
+      );
+    } finally {
+      setCheckingAdmin(false);
     }
   };
 
@@ -336,47 +340,48 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             </div>
           </div>
 
-          {/* Admin Section */}
+          {/* Server-Verified Admin Section */}
           <div className="card-modern p-5">
-            <h3 className="font-black text-text-main mb-4 flex items-center gap-2">
+            <h3 className="font-black text-text-main mb-3 flex items-center gap-2">
               <Shield
                 size={20}
-                className={settings.isAdmin ? 'text-primary' : 'text-text-muted'}
+                className={isAdmin ? 'text-primary' : 'text-text-muted'}
               />
               <span>{t('adminMode')}</span>
             </h3>
 
-            {settings.isAdmin ? (
+            {isAdmin ? (
               <div className="flex items-center gap-3 bg-primary/10 p-4 rounded-xl border border-primary/30">
-                <CheckCircle className="text-primary w-6 h-6" />
-                <span className="font-bold text-primary">{t('adminSuccess')}</span>
+                <CheckCircle className="text-primary w-6 h-6 shrink-0" />
+                <span className="font-bold text-primary text-sm">{t('adminSuccess')}</span>
               </div>
             ) : (
               <div className="flex flex-col gap-3">
-                <div className="relative">
-                  <input
-                    type="password"
-                    value={adminCodeInput}
-                    onChange={(e) => setAdminCodeInput(e.target.value)}
-                    placeholder={t('adminCode')}
-                    className="w-full bg-bg-dark border-2 border-border rounded-xl py-3.5 px-4 font-bold text-center text-text-main focus:border-primary transition-colors outline-none"
-                  />
-                  {adminStatus === 'error' && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-rose-400">
-                      <XCircle size={20} />
-                    </div>
-                  )}
-                </div>
-                <button
-                  onClick={handleVerifyAdmin}
-                  className="btn-modern w-full py-3.5 rounded-xl font-black flex items-center justify-center gap-2"
-                >
-                  <Shield size={18} />
-                  <span>{t('verify')}</span>
-                </button>
-                {adminStatus === 'error' && (
-                  <p className="text-center text-xs font-bold text-rose-400">
-                    {t('adminFail')}
+                <p className="text-xs font-bold text-text-muted leading-relaxed">
+                  {user
+                    ? lang === 'ar'
+                      ? 'يتم التحقق من صلاحيات الإدارة حصرياً عبر Firebase Custom Claims وسجل المشرفين على الخادم.'
+                      : 'Admin privileges are verified strictly via server-side Firebase Custom Claims.'
+                    : lang === 'ar'
+                    ? 'سجّل الدخول أولاً للتحقق من صلاحيات الإدارة المرتبطة بحسابك.'
+                    : 'Sign in first to verify server-granted admin permissions for your account.'}
+                </p>
+                {user && (
+                  <button
+                    type="button"
+                    onClick={handleRefreshAdmin}
+                    disabled={checkingAdmin}
+                    className="btn-modern w-full py-3.5 rounded-xl font-black flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <RefreshCw size={17} className={checkingAdmin ? 'animate-spin' : ''} />
+                    <span>
+                      {lang === 'ar' ? 'التحقق من صلاحيات الإدارة' : 'Verify Admin Permissions'}
+                    </span>
+                  </button>
+                )}
+                {adminCheckMessage && (
+                  <p className="text-center text-xs font-bold text-text-muted">
+                    {adminCheckMessage}
                   </p>
                 )}
               </div>
@@ -434,7 +439,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         </button>
       </div>
 
-      {/* In-App Confirmation Modal (Replaces window.confirm/alert) */}
+      {/* In-App Confirmation Modal */}
       {pendingConfirm && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-5">
           <div className="w-full max-w-sm bg-bg-surface border border-border-strong rounded-[2rem] p-6 text-center shadow-2xl">

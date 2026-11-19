@@ -5,23 +5,28 @@ import { Player } from '../types';
 import { playSound } from '../services/soundService';
 import { getUITranslation } from '../translations';
 import { getSettings } from '../services/storageService';
+import { isMrWhiteGuessMatch } from '../src/game/wordEngine';
 
 interface ImpostorGuessScreenProps {
   impostor: Player;
-  secretWord: string;
-  undercoverWord: string;
-  relatedWords: string[];
+  secretWord?: string;
+  undercoverWord?: string;
+  relatedWords?: string[];
   onGuess: (isCorrect: boolean) => void;
+  onSubmitGuessText?: (guess: string) => Promise<{ isCorrect: boolean; secretWord?: string }>;
 }
 
 export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
   impostor,
-  secretWord,
+  secretWord = '',
   onGuess,
+  onSubmitGuessText,
 }) => {
   const [guess, setGuess] = useState('');
   const [hasGuessed, setHasGuessed] = useState(false);
   const [isCorrect, setIsCorrect] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [revealedWord, setRevealedWord] = useState(secretWord);
 
   const settings = getSettings();
   const lang = settings.language;
@@ -40,35 +45,31 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
     return text;
   };
 
-  const normalizeWord = (str: string): string => {
-    return str
-      .trim()
-      .toLowerCase()
-      .replace(/[\u064B-\u065F\u0670]/g, '')
-      .replace(/[أإآ]/g, 'ا')
-      .replace(/ة/g, 'ه')
-      .replace(/ى/g, 'ي')
-      .replace(/^ال/, '')
-      .replace(/\s+/g, ' ');
-  };
+  const handleGuess = async () => {
+    const trimmed = guess.trim();
+    if (hasGuessed || submitting || !trimmed) return;
 
-  const handleGuess = () => {
-    if (hasGuessed || !guess.trim()) return;
+    if (onSubmitGuessText) {
+      setSubmitting(true);
+      try {
+        const res = await onSubmitGuessText(trimmed);
+        setIsCorrect(res.isCorrect);
+        if (res.secretWord) {
+          setRevealedWord(res.secretWord);
+        }
+        setHasGuessed(true);
+        playSound(res.isCorrect ? 'mrWhiteWin' : 'trumpets_sad');
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
 
-    const normGuess = normalizeWord(guess);
-    const normSecret = normalizeWord(secretWord);
-
-    const correct =
-      normGuess === normSecret ||
-      guess.trim().toLowerCase() === secretWord.trim().toLowerCase();
+    const correct = isMrWhiteGuessMatch(trimmed, secretWord);
+    setRevealedWord(secretWord);
     setIsCorrect(correct);
     setHasGuessed(true);
-
-    if (correct) {
-      playSound('mrWhiteWin');
-    } else {
-      playSound('trumpets_sad');
-    }
+    playSound(correct ? 'mrWhiteWin' : 'trumpets_sad');
   };
 
   const handleProceed = () => {
@@ -115,7 +116,7 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
                   value={guess}
                   onChange={(e) => setGuess(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleGuess();
+                    if (e.key === 'Enter') void handleGuess();
                   }}
                   placeholder={lang === 'ar' ? 'اكتب الكلمة هنا...' : 'Type word here...'}
                   className="w-full bg-transparent outline-none text-center text-2xl font-black text-white placeholder-slate-500 transition-all"
@@ -124,8 +125,8 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
               </div>
 
               <button
-                onClick={handleGuess}
-                disabled={!guess.trim()}
+                onClick={() => void handleGuess()}
+                disabled={!guess.trim() || submitting}
                 className="w-full py-4 rounded-2xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-lg font-black transition-all shadow-lg active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {lang === 'ar' ? 'تأكيد التخمين' : t('ok')}
@@ -160,11 +161,13 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
                 : t('mrWhiteWrongGuess')}
             </h2>
 
-            <p className="text-sm text-slate-300 mb-7 font-bold">
-              {lang === 'ar'
-                ? `كلمة المدنيين كانت: "${secretWord}"`
-                : `Civilian word was: "${secretWord}"`}
-            </p>
+            {revealedWord && (
+              <p className="text-sm text-slate-300 mb-7 font-bold">
+                {lang === 'ar'
+                  ? `كلمة المدنيين كانت: "${revealedWord}"`
+                  : `Civilian word was: "${revealedWord}"`}
+              </p>
+            )}
 
             <button
               onClick={handleProceed}

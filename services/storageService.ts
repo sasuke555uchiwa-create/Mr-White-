@@ -1,4 +1,5 @@
-// Force recompile: 2
+const STORAGE_VERSION = 2;
+const STORAGE_VERSION_KEY = 'chkoun_barra_schema_version';
 const PLAYERS_KEY = 'chkoun_barra_recent_players';
 const SCORES_KEY = 'chkoun_barra_scores';
 const SETTINGS_KEY = 'chkoun_barra_settings';
@@ -7,14 +8,17 @@ const CUSTOM_WORDS_KEY = 'chkoun_barra_custom_words';
 const CUSTOM_CATEGORIES_KEY = 'chkoun_barra_custom_categories';
 const INVENTORY_KEY = 'chkoun_barra_inventory';
 
+const ALLOWED_THEMES = ['dark', 'gray', 'light', 'system'] as const;
+const ALLOWED_BUTTON_COLORS = ['default', 'blue', 'green', 'red', 'purple', 'orange'] as const;
+const ALLOWED_LANGUAGES = ['ar', 'en', 'fr', 'es', 'de', 'tr', 'pt'] as const;
+
 export interface AppSettings {
   soundVolume: number; // 0.0 to 1.0
   hapticEnabled: boolean;
-  language: string; 
+  language: string;
   theme: 'dark' | 'gray' | 'light' | 'system';
   buttonColor?: 'default' | 'blue' | 'green' | 'red' | 'purple' | 'orange';
   avatar?: string;
-  isAdmin?: boolean;
 }
 
 export interface CustomWordPair {
@@ -45,62 +49,148 @@ const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   buttonColor: 'default',
   avatar: '👤',
-  isAdmin: false
+};
+
+const safeReadJson = <T,>(key: string, fallback: T): T => {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed === null || parsed === undefined ? fallback : (parsed as T);
+  } catch {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // ignore quota/private-mode errors
+    }
+    return fallback;
+  }
+};
+
+const safeWriteJson = (key: string, value: unknown): void => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (err) {
+    console.warn('localStorage write failed for key:', key, err);
+  }
+};
+
+export const ensureStorageSchema = (): void => {
+  try {
+    const current = Number(localStorage.getItem(STORAGE_VERSION_KEY) || '0');
+    if (current < STORAGE_VERSION) {
+      // Strip legacy insecure client-side isAdmin field if present
+      const rawSettings = safeReadJson<Record<string, unknown>>(SETTINGS_KEY, {});
+      if ('isAdmin' in rawSettings) {
+        delete rawSettings.isAdmin;
+        safeWriteJson(SETTINGS_KEY, rawSettings);
+      }
+      localStorage.setItem(STORAGE_VERSION_KEY, String(STORAGE_VERSION));
+    }
+  } catch {
+    // ignore
+  }
+};
+
+ensureStorageSchema();
+
+export const sanitizeSettings = (raw: unknown): AppSettings => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ...DEFAULT_SETTINGS };
+  }
+  const obj = raw as Record<string, unknown>;
+  const vol = typeof obj.soundVolume === 'number' && Number.isFinite(obj.soundVolume)
+    ? Math.min(1, Math.max(0, obj.soundVolume))
+    : DEFAULT_SETTINGS.soundVolume;
+  const haptic = typeof obj.hapticEnabled === 'boolean'
+    ? obj.hapticEnabled
+    : DEFAULT_SETTINGS.hapticEnabled;
+  const language =
+    typeof obj.language === 'string' && (ALLOWED_LANGUAGES as readonly string[]).includes(obj.language)
+      ? obj.language
+      : DEFAULT_SETTINGS.language;
+  const theme =
+    typeof obj.theme === 'string' && (ALLOWED_THEMES as readonly string[]).includes(obj.theme)
+      ? (obj.theme as AppSettings['theme'])
+      : DEFAULT_SETTINGS.theme;
+  const buttonColor =
+    typeof obj.buttonColor === 'string' &&
+    (ALLOWED_BUTTON_COLORS as readonly string[]).includes(obj.buttonColor)
+      ? (obj.buttonColor as AppSettings['buttonColor'])
+      : DEFAULT_SETTINGS.buttonColor;
+  const avatar =
+    typeof obj.avatar === 'string' && obj.avatar.length <= 2048
+      ? obj.avatar
+      : DEFAULT_SETTINGS.avatar;
+
+  return {
+    soundVolume: vol,
+    hapticEnabled: haptic,
+    language,
+    theme,
+    buttonColor,
+    avatar,
+  };
 };
 
 export const getRecentPlayers = (): RecentPlayer[] => {
-  try {
-    const stored = localStorage.getItem(PLAYERS_KEY);
-    if (!stored) return [];
-    
-    const parsed = JSON.parse(stored);
-    
-    // Migration: Check if it's the old string array format
-    if (Array.isArray(parsed) && parsed.length > 0) {
-        if (typeof parsed[0] === 'string') {
-            // Convert old string array to object array with default avatar
-            return parsed.map((name: string) => ({ name, avatar: '👤' }));
+  const parsed = safeReadJson<unknown>(PLAYERS_KEY, []);
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .map((item): RecentPlayer | null => {
+      if (typeof item === 'string' && item.trim()) {
+        return { name: item.trim().slice(0, 40), avatar: '👤' };
+      }
+      if (item && typeof item === 'object') {
+        const rec = item as Record<string, unknown>;
+        if (typeof rec.name === 'string' && rec.name.trim()) {
+          return {
+            name: rec.name.trim().slice(0, 40),
+            avatar: typeof rec.avatar === 'string' ? rec.avatar : '👤',
+            isSleeping: Boolean(rec.isSleeping),
+          };
         }
-        return parsed as RecentPlayer[];
-    }
-    return [];
-  } catch {
-    return [];
-  }
+      }
+      return null;
+    })
+    .filter((p): p is RecentPlayer => p !== null);
 };
 
 export const saveRecentPlayers = (players: RecentPlayer[]) => {
-  // Get existing to preserve avatars if not provided (though we usually provide latest)
   const existing = getRecentPlayers();
   const map = new Map<string, RecentPlayer>();
-  
-  // Load existing
-  existing.forEach(p => map.set(p.name, p));
-  
-  // Overwrite/Add new
-  players.forEach(p => map.set(p.name, p));
-  
-  const unique = Array.from(map.values());
-  localStorage.setItem(PLAYERS_KEY, JSON.stringify(unique));
+
+  existing.forEach((p) => map.set(p.name, p));
+  players.forEach((p) => {
+    if (p.name && p.name.trim()) {
+      map.set(p.name.trim(), { ...p, name: p.name.trim().slice(0, 40) });
+    }
+  });
+
+  safeWriteJson(PLAYERS_KEY, Array.from(map.values()));
 };
 
 export const overwriteRecentPlayers = (players: RecentPlayer[]) => {
-  localStorage.setItem(PLAYERS_KEY, JSON.stringify(players));
+  safeWriteJson(PLAYERS_KEY, players);
 };
 
 export const getScores = (): Record<string, number> => {
-  try {
-    const stored = localStorage.getItem(SCORES_KEY);
-    return stored ? JSON.parse(stored) : {};
-  } catch {
-    return {};
-  }
+  const parsed = safeReadJson<unknown>(SCORES_KEY, {});
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const clean: Record<string, number> = {};
+  Object.entries(parsed as Record<string, unknown>).forEach(([name, score]) => {
+    if (typeof score === 'number' && Number.isFinite(score) && score >= 0) {
+      clean[name] = score;
+    }
+  });
+  return clean;
 };
 
 export const updatePlayerScore = (name: string, points: number) => {
+  if (!name || !Number.isFinite(points)) return;
   const scores = getScores();
-  scores[name] = (scores[name] || 0) + points;
-  localStorage.setItem(SCORES_KEY, JSON.stringify(scores));
+  scores[name] = Math.max(0, (scores[name] || 0) + points);
+  safeWriteJson(SCORES_KEY, scores);
 };
 
 export const resetScores = () => {
@@ -118,94 +208,87 @@ export const clearAllData = () => {
 };
 
 export const getSettings = (): AppSettings => {
-  try {
-    const stored = localStorage.getItem(SETTINGS_KEY);
-    return stored ? { ...DEFAULT_SETTINGS, ...JSON.parse(stored) } : DEFAULT_SETTINGS;
-  } catch {
-    return DEFAULT_SETTINGS;
-  }
+  const stored = safeReadJson<unknown>(SETTINGS_KEY, null);
+  return sanitizeSettings(stored);
 };
 
 export const saveSettings = (settings: AppSettings) => {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  safeWriteJson(SETTINGS_KEY, sanitizeSettings(settings));
 };
 
 // --- Words Management ---
 
 export const getHiddenWords = (): string[] => {
-  try {
-    const stored = localStorage.getItem(HIDDEN_WORDS_KEY);
-    return stored ? JSON.parse(stored) : [];
-  } catch {
-    return [];
-  }
+  const parsed = safeReadJson<unknown>(HIDDEN_WORDS_KEY, []);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((w): w is string => typeof w === 'string' && w.trim().length > 0);
 };
 
 export const hideWord = (word: string) => {
   const hidden = getHiddenWords();
   if (!hidden.includes(word)) {
     hidden.push(word);
-    localStorage.setItem(HIDDEN_WORDS_KEY, JSON.stringify(hidden));
+    safeWriteJson(HIDDEN_WORDS_KEY, hidden);
   }
 };
 
-export const unhideWord = (word: string) => { // Optional, in case we want to restore
-    let hidden = getHiddenWords();
-    hidden = hidden.filter(w => w !== word);
-    localStorage.setItem(HIDDEN_WORDS_KEY, JSON.stringify(hidden));
+export const unhideWord = (word: string) => {
+  const hidden = getHiddenWords().filter((w) => w !== word);
+  safeWriteJson(HIDDEN_WORDS_KEY, hidden);
 };
 
 export const getCustomWordPairs = (): CustomWordPair[] => {
-  try {
-    const stored = localStorage.getItem(CUSTOM_WORDS_KEY);
-    return stored ? JSON.parse(stored) : [];
-  } catch {
-    return [];
-  }
+  const parsed = safeReadJson<unknown>(CUSTOM_WORDS_KEY, []);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((item): item is CustomWordPair => {
+    if (!item || typeof item !== 'object') return false;
+    const obj = item as Record<string, unknown>;
+    return (
+      typeof obj.id === 'string' &&
+      typeof obj.word1 === 'string' &&
+      typeof obj.word2 === 'string' &&
+      typeof obj.language === 'string'
+    );
+  });
 };
 
 export const saveCustomWordPair = (pair: CustomWordPair) => {
   const customs = getCustomWordPairs();
   customs.push(pair);
-  localStorage.setItem(CUSTOM_WORDS_KEY, JSON.stringify(customs));
+  safeWriteJson(CUSTOM_WORDS_KEY, customs);
 };
 
 export const removeCustomWordPair = (id: string) => {
-  let customs = getCustomWordPairs();
-  customs = customs.filter(p => p.id !== id);
-  localStorage.setItem(CUSTOM_WORDS_KEY, JSON.stringify(customs));
+  const customs = getCustomWordPairs().filter((p) => p.id !== id);
+  safeWriteJson(CUSTOM_WORDS_KEY, customs);
 };
 
 // --- Custom Categories Management ---
 
-export const fetchCustomCategories = (): CustomCategory[] => { // Force reload
-  try {
-    const stored = localStorage.getItem(CUSTOM_CATEGORIES_KEY);
-    return stored ? JSON.parse(stored) : [];
-  } catch {
-    return [];
-  }
+export const fetchCustomCategories = (): CustomCategory[] => {
+  const parsed = safeReadJson<unknown>(CUSTOM_CATEGORIES_KEY, []);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((item): item is CustomCategory => {
+    if (!item || typeof item !== 'object') return false;
+    const obj = item as Record<string, unknown>;
+    return typeof obj.id === 'string' && typeof obj.name === 'string';
+  });
 };
 
 export const saveCustomCategory = (cat: CustomCategory) => {
   const cats = fetchCustomCategories();
-  const index = cats.findIndex(c => c.id === cat.id);
-  
+  const index = cats.findIndex((c) => c.id === cat.id);
   if (index >= 0) {
-      // Update existing
-      cats[index] = cat;
+    cats[index] = cat;
   } else {
-      // Add new
-      cats.push(cat);
+    cats.push(cat);
   }
-  
-  localStorage.setItem(CUSTOM_CATEGORIES_KEY, JSON.stringify(cats));
+  safeWriteJson(CUSTOM_CATEGORIES_KEY, cats);
 };
 
 export const removeCustomCategory = (id: string) => {
-  let cats = fetchCustomCategories();
-  cats = cats.filter(c => c.id !== id);
-  localStorage.setItem(CUSTOM_CATEGORIES_KEY, JSON.stringify(cats));
+  const cats = fetchCustomCategories().filter((c) => c.id !== id);
+  safeWriteJson(CUSTOM_CATEGORIES_KEY, cats);
 };
 
 // --- Shop / Inventory Management ---
@@ -219,26 +302,21 @@ const LEGACY_PERK_ALIASES: Record<string, string> = {
 };
 
 export const getInventoryMap = (): Record<string, string[]> => {
-  try {
-    const stored = localStorage.getItem(INVENTORY_KEY);
-    if (!stored) return {};
-    const parsed = JSON.parse(stored) as Record<string, string[]>;
-    const normalized: Record<string, string[]> = {};
-    Object.entries(parsed).forEach(([player, items]) => {
-      if (Array.isArray(items)) {
-        normalized[player] = Array.from(
-          new Set(
-            items
-              .filter((id) => id !== 'ad_block')
-              .map((id) => LEGACY_PERK_ALIASES[id] || id)
-          )
-        );
-      }
-    });
-    return normalized;
-  } catch {
-    return {};
-  }
+  const parsed = safeReadJson<unknown>(INVENTORY_KEY, {});
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const normalized: Record<string, string[]> = {};
+  Object.entries(parsed as Record<string, unknown>).forEach(([player, items]) => {
+    if (Array.isArray(items)) {
+      normalized[player] = Array.from(
+        new Set(
+          items
+            .filter((id): id is string => typeof id === 'string' && id !== 'ad_block')
+            .map((id) => LEGACY_PERK_ALIASES[id] || id)
+        )
+      );
+    }
+  });
+  return normalized;
 };
 
 export const getPlayerInventory = (playerName: string): string[] => {
@@ -250,12 +328,15 @@ export const hasPlayerPerk = (playerName: string, itemId: string): boolean => {
   return getPlayerInventory(playerName).includes(itemId);
 };
 
-export const addPlayerInventoryItem = (playerName: string, itemId: string): Record<string, string[]> => {
+export const addPlayerInventoryItem = (
+  playerName: string,
+  itemId: string
+): Record<string, string[]> => {
   const inv = getInventoryMap();
   const current = inv[playerName] || [];
   if (!current.includes(itemId)) {
     inv[playerName] = [...current, itemId];
-    localStorage.setItem(INVENTORY_KEY, JSON.stringify(inv));
+    safeWriteJson(INVENTORY_KEY, inv);
   }
   return inv;
 };

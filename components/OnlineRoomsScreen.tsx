@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, query, where, onSnapshot, limit, getDocs } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, limit } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHandler';
+import { joinOnlineRoom, quickJoinOnlineRoom } from '../utils/onlineRoomService';
 import { motion } from 'framer-motion';
 import { ArrowRight, Search, Plus, Globe, Lock, EyeOff, Eye, Zap, Clock, Minus } from 'lucide-react';
 import { Avatar } from './Avatar';
@@ -19,7 +20,8 @@ interface Room {
   category?: string;
   difficulty?: 'easy' | 'hard';
   turnDurationSeconds?: number;
-  secretCode: string;
+  hasSecretCode?: boolean;
+  isPrivate?: boolean;
   status: string;
 }
 
@@ -81,6 +83,7 @@ export const OnlineRoomsScreen: React.FC<OnlineRoomsScreenProps> = ({
 
     const q = query(
       collection(db, 'rooms'),
+      where('isPrivate', '==', false),
       where('status', '==', 'waiting'),
       limit(30)
     );
@@ -104,6 +107,7 @@ export const OnlineRoomsScreen: React.FC<OnlineRoomsScreenProps> = ({
         setLoading(false);
       },
       (error) => {
+        setLoading(false);
         handleFirestoreError(error, OperationType.LIST, 'rooms');
       }
     );
@@ -121,11 +125,6 @@ export const OnlineRoomsScreen: React.FC<OnlineRoomsScreenProps> = ({
     return rooms;
   }, [rooms, activeFilter]);
 
-  const openRooms = useMemo(
-    () => rooms.filter((r) => (r.players?.length || 0) < (r.maxPlayers || 8)),
-    [rooms]
-  );
-
   if (!user) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center bg-bg-dark text-text-main">
@@ -141,43 +140,41 @@ export const OnlineRoomsScreen: React.FC<OnlineRoomsScreenProps> = ({
     );
   }
 
-  const handleQuickJoin = () => {
-    if (openRooms.length === 0) {
-      showToast(t('noOpenRoomsForQuickJoin'), 'info');
-      return;
+  const handleQuickJoin = async () => {
+    if (joining) return;
+    setJoining(true);
+    try {
+      const res = await quickJoinOnlineRoom();
+      if (res.success && res.roomId) {
+        onJoinRoom(res.roomId);
+      } else {
+        showToast(t('noOpenRoomsForQuickJoin'), 'info');
+      }
+    } catch (error) {
+      console.error('Quick join error:', error);
+      showToast(t('searchError'), 'error');
+    } finally {
+      setJoining(false);
     }
-    // Prefer rooms with more players already waiting so match starts sooner
-    const sorted = [...openRooms].sort(
-      (a, b) => (b.players?.length || 0) - (a.players?.length || 0)
-    );
-    onJoinRoom(sorted[0].id);
   };
 
   const handleJoinWithCode = async (e: React.FormEvent) => {
     e.preventDefault();
     const code = joinCode.trim();
-    if (!code) return;
+    if (!code || joining) return;
 
     setJoining(true);
     setJoinError(null);
 
     try {
-      const q = query(
-        collection(db, 'rooms'),
-        where('secretCode', '==', code),
-        where('status', '==', 'waiting'),
-        limit(1)
-      );
-
-      const snapshot = await getDocs(q);
-
-      if (snapshot.empty) {
-        const msg = t('roomNotFound');
+      const res = await joinOnlineRoom({ secretCode: code });
+      if (res.success && res.roomId) {
+        onJoinRoom(res.roomId);
+      } else {
+        const msgKey = res.reason === 'roomFull' ? 'roomFull' : res.reason === 'kickedFromRoom' ? 'kickedFromRoom' : 'roomNotFound';
+        const msg = t(msgKey);
         setJoinError(msg);
         showToast(msg, 'warning');
-      } else {
-        const roomDoc = snapshot.docs[0];
-        onJoinRoom(roomDoc.id);
       }
     } catch (error) {
       console.error('Error joining room by code:', error);
@@ -302,7 +299,7 @@ export const OnlineRoomsScreen: React.FC<OnlineRoomsScreenProps> = ({
                     <div className="min-w-0">
                       <div className="font-black text-base flex items-center gap-1.5 drop-shadow-sm truncate">
                         <span className="truncate">{room.hostName}</span>
-                        {room.secretCode && <Lock className="w-3 h-3 text-accent shrink-0" />}
+                        {(room.hasSecretCode || room.isPrivate) && <Lock className="w-3 h-3 text-accent shrink-0" />}
                       </div>
                       <div className="text-xs text-text-muted font-bold flex items-center gap-1.5 flex-wrap mt-0.5">
                         <span>{catTitle}</span>

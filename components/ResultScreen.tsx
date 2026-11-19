@@ -478,6 +478,7 @@ export const ResultScreen: React.FC<ResultScreenProps> = ({
                 <img
                   src={getWinImage()}
                   alt={getResultTitle()}
+                  loading="lazy"
                   referrerPolicy="no-referrer"
                   className="w-full h-full object-cover"
                 />

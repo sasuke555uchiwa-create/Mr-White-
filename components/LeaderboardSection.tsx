@@ -16,12 +16,12 @@ export const LeaderboardSection: React.FC = () => {
   useEffect(() => {
     const fetchLeaders = async () => {
       try {
-        const q = query(collection(db, 'users'), orderBy('xp', 'desc'), limit(10));
+        const q = query(collection(db, 'publicProfiles'), orderBy('xp', 'desc'), limit(10));
         const snapshot = await getDocs(q);
         const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setLeaders(data);
       } catch (error) {
-        handleFirestoreError(error, OperationType.LIST, 'users');
+        handleFirestoreError(error, OperationType.LIST, 'publicProfiles');
       } finally {
         setLoading(false);
       }

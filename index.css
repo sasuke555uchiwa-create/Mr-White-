@@ -147,14 +147,14 @@ body {
 
 .theme-dark .bg-game-premium {
   background-color: #070b14;
-  background-image: linear-gradient(180deg, rgba(7, 11, 20, 0.55) 0%, rgba(7, 11, 20, 0.82) 100%), url('/assets/wallpapers/dark_cosmic.png');
+  background-image: linear-gradient(180deg, rgba(7, 11, 20, 0.55) 0%, rgba(7, 11, 20, 0.82) 100%), url('/assets/wallpapers/dark_cosmic.webp');
   background-size: cover;
   background-position: center;
 }
 
 .theme-light .bg-game-premium {
   background-color: #f8fafc;
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, rgba(248, 250, 252, 0.65) 100%), url('/assets/wallpapers/light_sakura.png');
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, rgba(248, 250, 252, 0.65) 100%), url('/assets/wallpapers/light_sakura.webp');
   background-size: cover;
   background-position: center;
 }

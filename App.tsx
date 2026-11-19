@@ -1,19 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import {
-  GamePhase,
-  Player,
-  GameSettings,
-  DescriptionEntry,
-  PlayerRole,
-  SpecialRoleId,
-} from './types';
+import React, { useState, useEffect, useCallback } from 'react';
+import { GamePhase } from './types';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { PlayerSetup } from './components/PlayerSetup';
 import { GameRound } from './components/GameRound';
 import { GameSettingsScreen } from './components/GameSettingsScreen';
 import { QuestionPhase } from './components/QuestionPhase';
 import { DiscussionPhase } from './components/DiscussionPhase';
-import { VotingScreen, VoteCompletionMeta } from './components/VotingScreen';
+import { VotingScreen } from './components/VotingScreen';
 import { RevealVoteResult } from './components/RevealVoteResult';
 import { ResultScreen } from './components/ResultScreen';
 import { ScoreboardScreen } from './components/ScoreboardScreen';
@@ -29,24 +22,18 @@ import { InventoryScreen } from './components/InventoryScreen';
 import { AuthProvider } from './contexts/AuthContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Avatar } from './components/Avatar';
-import { auth, db } from './firebase';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
-import { getRandomWordPair } from './services/geminiService';
+import { auth } from './firebase';
 import { Header } from './components/Header';
-import {
-  getScores,
-  saveRecentPlayers,
-  updatePlayerScore,
-  getSettings,
-} from './services/storageService';
+import { saveRecentPlayers, getSettings } from './services/storageService';
 import { playSound } from './services/soundService';
-import { getPlayerRoundPoints } from './services/gameScoring';
 import { AnimatePresence, motion } from 'framer-motion';
 import { getUITranslation } from './translations';
 import { ToastHost } from './components/ToastHost';
 import { showToast } from './utils/toast';
-import { leaveOnlineRoom } from './utils/onlineRoomService';
+import { createOnlineRoom, joinOnlineRoom, leaveOnlineRoom } from './utils/onlineRoomService';
 import { getRoleAsset, getRoleTitle } from './data/specialRoles';
+import { useOfflineMatch } from './hooks/useOfflineMatch';
+import { hasSpecialRole } from './src/game/voteEngine';
 
 const ACTIVE_GAME_PHASES = [
   GamePhase.REVEAL,
@@ -61,41 +48,10 @@ const ACTIVE_GAME_PHASES = [
 
 function AppContent() {
   const [phase, setPhase] = useState<GamePhase>(GamePhase.WELCOME);
-  const [players, setPlayers] = useState<Player[]>([]);
-  const [rolePool, setRolePool] = useState<string[]>([]);
-  const [specialRolePool, setSpecialRolePool] = useState<(SpecialRoleId | null)[]>([]);
-  const [secretWord, setSecretWord] = useState<string>('');
-  const [undercoverWord, setUndercoverWord] = useState<string>('');
-  const [relatedWords, setRelatedWords] = useState<string[]>([]);
-  const [impostorIndex, setImpostorIndex] = useState<number>(-1);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const [voteData, setVoteData] = useState<Record<number, number>>({});
-  const [mostVotedPlayerId, setMostVotedPlayerId] = useState<number | null>(null);
-  const [blockedBySpecial, setBlockedBySpecial] = useState<'boomerang' | 'protector' | null>(null);
-  const [bouncedFromName, setBouncedFromName] = useState<string | null>(null);
-  const [foolBonusTriggered, setFoolBonusTriggered] = useState<boolean>(false);
-  const [loversPartnerName, setLoversPartnerName] = useState<string | null>(null);
-
-  // Special Role Interactive Modals
-  const [pendingTieCandidates, setPendingTieCandidates] = useState<number[] | null>(null);
-  const [pendingAvengerId, setPendingAvengerId] = useState<number | null>(null);
-  const [pendingBoomerangId, setPendingBoomerangId] = useState<number | null>(null);
-  const [pendingVoteMeta, setPendingVoteMeta] = useState<VoteCompletionMeta | null>(null);
-
-  const [descriptionsLog, setDescriptionsLog] = useState<DescriptionEntry[]>([]);
-
-  const [lastWinner, setLastWinner] = useState<'impostor' | 'citizens' | 'fool' | null>(null);
-  const [winReason, setWinReason] = useState<
-    'impostor_guessed' | 'citizens_wrong_vote' | 'impostor_caught' | 'fool_won' | null
-  >(null);
-  const [currentRound, setCurrentRound] = useState<number>(1);
-
-  // Online State
   const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
+  const [showExitConfirmation, setShowExitConfirmation] = useState(false);
+  const [onlineBusy, setOnlineBusy] = useState(false);
 
-  // Theme & Language State
   const [currentTheme, setCurrentTheme] = useState<'dark' | 'gray' | 'light' | 'system'>(
     getSettings().theme || 'dark'
   );
@@ -103,7 +59,14 @@ function AppContent() {
     getSettings().buttonColor || 'default'
   );
   const [currentLanguage, setCurrentLanguage] = useState(getSettings().language || 'ar');
-  const t = (key: string) => getUITranslation(currentLanguage, key);
+  const t = useCallback((key: string) => getUITranslation(currentLanguage, key), [currentLanguage]);
+
+  const navigate = useCallback((newPhase: GamePhase) => {
+    setPhase(newPhase);
+    window.history.pushState({ phase: newPhase }, '');
+  }, []);
+
+  const offline = useOfflineMatch({ navigate, t });
 
   const bgClass = (() => {
     if (phase === GamePhase.VOTING || phase === GamePhase.REVEAL_VOTE_RESULT) {
@@ -142,60 +105,6 @@ function AppContent() {
     document.documentElement.lang = currentLanguage;
   }, [currentLanguage, phase, bgClass]);
 
-  const handleThemeChange = (theme: 'dark' | 'gray' | 'light' | 'system') => {
-    setCurrentTheme(theme);
-  };
-
-  const handleButtonColorChange = (
-    color: 'default' | 'blue' | 'green' | 'red' | 'purple' | 'orange'
-  ) => {
-    setCurrentButtonColor(color);
-  };
-
-  const handleLanguageChange = (lang: string) => {
-    setCurrentLanguage(lang);
-  };
-
-  const setPlayerRole = (
-    playerId: number,
-    role: string,
-    specialRole: SpecialRoleId | null = null
-  ) => {
-    setPlayers((prev) => {
-      const typedRole = role as PlayerRole;
-      const isLover = specialRole === 'lovers' || typedRole === 'lovers';
-      const existingLover = isLover
-        ? prev.find(
-            (p) =>
-              p.id !== playerId &&
-              (p.specialRole === 'lovers' || p.role === 'lovers')
-          )
-        : undefined;
-
-      return prev.map((p) => {
-        if (p.id === playerId) {
-          const isImpostor = typedRole === 'mrwhite';
-          if (isImpostor) setImpostorIndex(playerId);
-          return {
-            ...p,
-            role: typedRole,
-            specialRole: specialRole ?? null,
-            isImpostor,
-            loverPartnerId: existingLover ? existingLover.id : p.loverPartnerId,
-          };
-        }
-        if (existingLover && p.id === existingLover.id) {
-          return { ...p, loverPartnerId: playerId };
-        }
-        return p;
-      });
-    });
-  };
-
-  const [tempPlayers, setTempPlayers] = useState<{ name: string; avatar: string }[]>([]);
-  const [showExitConfirmation, setShowExitConfirmation] = useState(false);
-
-  // History Management
   useEffect(() => {
     if (!window.history.state) {
       window.history.replaceState({ phase: GamePhase.WELCOME }, '');
@@ -226,523 +135,13 @@ function AppContent() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, [phase, showExitConfirmation]);
 
-  const navigate = (newPhase: GamePhase) => {
-    setPhase(newPhase);
-    window.history.pushState({ phase: newPhase }, '');
-  };
-
-  const startGameSetup = () => navigate(GamePhase.SETUP);
-  const handleManagePlayers = () => navigate(GamePhase.PLAYERS_LIST);
-
   const handlePlayersConfirmed = async (
     playersData: { name: string; avatar: string; isSleeping?: boolean }[]
   ) => {
     const activePlayers = playersData.filter((p) => !p.isSleeping);
-    setTempPlayers(activePlayers);
+    offline.setTempPlayers(activePlayers);
     saveRecentPlayers(playersData);
     navigate(GamePhase.GAME_SETTINGS);
-  };
-
-  const [gameSettings, setGameSettings] = useState<GameSettings>({
-    mrWhiteCount: 1,
-    undercoverCount: 0,
-    category: 'standard',
-    difficulty: 'easy',
-    useSpecialRoles: false,
-    selectedSpecialRoles: [],
-    gameMode: 'expression',
-    turnDurationSeconds: 45,
-  });
-
-  const handleGameSettingsConfirmed = async (settings: GameSettings) => {
-    setGameSettings(settings);
-    setIsLoading(true);
-    setError(null);
-    try {
-      const { civilianWord, undercoverWord: ucWord, decoys } = await getRandomWordPair(
-        undefined,
-        settings.category
-      );
-      initializeGame(tempPlayers, civilianWord, ucWord, decoys, settings);
-    } catch (err) {
-      console.error(err);
-      setError(t('errorLoadingWords'));
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const initializeGame = (
-    activePlayers: { name: string; avatar: string }[],
-    civilianWord: string,
-    ucWord: string,
-    decoys: string[] = [],
-    settings: GameSettings
-  ) => {
-    const globalScores = getScores();
-    const newPlayers: Player[] = activePlayers.map((p, index) => ({
-      id: index,
-      name: p.name,
-      role: 'citizen',
-      specialRole: null,
-      isImpostor: false,
-      score: globalScores[p.name] || 0,
-      avatar: p.avatar,
-      isEliminated: false,
-      specialAbilityUsed: false,
-      foolBonusAwarded: false,
-      loverPartnerId: undefined,
-    }));
-
-    // Build main faction pool (Civilians, Undercovers, Mr. Whites)
-    const pool: string[] = [];
-    for (let i = 0; i < settings.mrWhiteCount; i++) {
-      pool.push('mrwhite');
-    }
-    for (let i = 0; i < settings.undercoverCount; i++) {
-      pool.push('undercover');
-    }
-    while (pool.length < activePlayers.length) {
-      pool.push('citizen');
-    }
-    pool.sort(() => 0.5 - Math.random());
-
-    // Build layered special powers pool (Special Roles NEVER override main team and NEVER win solo)
-    const spPool: (SpecialRoleId | null)[] = Array(activePlayers.length).fill(null);
-    if (
-      settings.useSpecialRoles &&
-      settings.selectedSpecialRoles &&
-      settings.selectedSpecialRoles.length > 0
-    ) {
-      const availableIndices = Array.from({ length: activePlayers.length }, (_, i) => i).sort(
-        () => 0.5 - Math.random()
-      );
-      const shuffledSpecials = [...settings.selectedSpecialRoles].sort(() => 0.5 - Math.random());
-
-      for (const roleId of shuffledSpecials) {
-        if (roleId === 'lovers') {
-          if (activePlayers.length >= 5 && availableIndices.length >= 2) {
-            const idx1 = availableIndices.pop()!;
-            const idx2 = availableIndices.pop()!;
-            spPool[idx1] = 'lovers';
-            spPool[idx2] = 'lovers';
-          }
-        } else if (roleId === 'mr_meme') {
-          if (availableIndices.length > 0) {
-            // Prefer giving Mr. Meme to someone who has a word (not Mr. White)
-            const nonWhitePos = availableIndices.findIndex((idx) => pool[idx] !== 'mrwhite');
-            const pickedIdx =
-              nonWhitePos !== -1
-                ? availableIndices.splice(nonWhitePos, 1)[0]
-                : availableIndices.pop()!;
-            spPool[pickedIdx] = 'mr_meme';
-          }
-        } else if (availableIndices.length > 0) {
-          const idx = availableIndices.pop()!;
-          spPool[idx] = roleId;
-        }
-      }
-    }
-
-    setPlayers(newPlayers);
-    setRolePool(pool);
-    setSpecialRolePool(spPool);
-    setSecretWord(civilianWord);
-    setUndercoverWord(ucWord);
-    setRelatedWords(decoys);
-    setImpostorIndex(-1);
-    setLastWinner(null);
-    setWinReason(null);
-    setVoteData({});
-    setMostVotedPlayerId(null);
-    setBlockedBySpecial(null);
-    setBouncedFromName(null);
-    setFoolBonusTriggered(false);
-    setLoversPartnerName(null);
-    setPendingTieCandidates(null);
-    setPendingAvengerId(null);
-    setDescriptionsLog([]);
-    setCurrentRound(1);
-    navigate(GamePhase.REVEAL);
-  };
-
-  const evaluateWinOrContinue = (updatedPlayers: Player[]) => {
-    const aliveCitizens = updatedPlayers.filter(
-      (p) => !p.isEliminated && p.role !== 'mrwhite' && p.role !== 'undercover'
-    ).length;
-    const aliveBadGuys = updatedPlayers.filter(
-      (p) => !p.isEliminated && (p.role === 'mrwhite' || p.role === 'undercover')
-    ).length;
-
-    // Civilians win immediately once all Infiltrators are out
-    if (aliveBadGuys === 0) {
-      setWinReason('impostor_caught');
-      handleGameEnd('citizens', 'impostor_caught', undefined, updatedPlayers);
-      navigate(GamePhase.RESULT);
-    } else if (aliveBadGuys >= aliveCitizens || aliveCitizens <= 1) {
-      // Infiltrators win if they match/outnumber Civilians or only 1 Civilian remains
-      setWinReason('citizens_wrong_vote');
-      handleGameEnd('impostor', 'citizens_wrong_vote', undefined, updatedPlayers);
-      navigate(GamePhase.RESULT);
-    } else {
-      setCurrentRound((prev) => prev + 1);
-      setVoteData({});
-      setMostVotedPlayerId(null);
-      setBlockedBySpecial(null);
-      setBouncedFromName(null);
-      setFoolBonusTriggered(false);
-      setLoversPartnerName(null);
-      navigate(GamePhase.PLAYING);
-    }
-  };
-
-  const eliminatePlayerAndCheckWin = (eliminatedId: number) => {
-    const eliminatedPlayer = players.find((p) => p.id === eliminatedId);
-    const isFirstElimination = !players.some((p) => p.isEliminated);
-    const hasFool =
-      eliminatedPlayer?.specialRole === 'fool' || eliminatedPlayer?.role === 'fool';
-    const earnedFoolBonus = isFirstElimination && hasFool;
-
-    // Lovers chain elimination (applies even if specialRole is 'lovers')
-    const hasLovers =
-      eliminatedPlayer?.specialRole === 'lovers' || eliminatedPlayer?.role === 'lovers';
-    const partnerId = hasLovers ? eliminatedPlayer?.loverPartnerId : undefined;
-    const hasAvenger =
-      eliminatedPlayer?.specialRole === 'avenger' || eliminatedPlayer?.role === 'avenger';
-
-    const updatedPlayers = players.map((p) => {
-      if (p.id === eliminatedId) {
-        return {
-          ...p,
-          isEliminated: true,
-          foolBonusAwarded: earnedFoolBonus ? true : p.foolBonusAwarded,
-          specialAbilityUsed: hasAvenger ? true : p.specialAbilityUsed,
-        };
-      }
-      if (partnerId !== undefined && p.id === partnerId) {
-        return { ...p, isEliminated: true };
-      }
-      return p;
-    });
-
-    setPlayers(updatedPlayers);
-
-    const remainingAlive = updatedPlayers.filter((p) => !p.isEliminated);
-    const aliveCitizensAfter = remainingAlive.filter(
-      (p) => p.role !== 'mrwhite' && p.role !== 'undercover'
-    ).length;
-    const aliveBadGuysAfter = remainingAlive.filter(
-      (p) => p.role === 'mrwhite' || p.role === 'undercover'
-    ).length;
-    const isRoundAlreadyDecided =
-      aliveBadGuysAfter === 0 ||
-      aliveBadGuysAfter >= aliveCitizensAfter ||
-      aliveCitizensAfter <= 1;
-
-    // Avenger revenge trigger only if the match has not already ended and > 1 player remains
-    if (
-      hasAvenger &&
-      !eliminatedPlayer?.specialAbilityUsed &&
-      !isRoundAlreadyDecided &&
-      remainingAlive.length > 1
-    ) {
-      setPendingAvengerId(eliminatedPlayer!.id);
-      return;
-    }
-
-    evaluateWinOrContinue(updatedPlayers);
-  };
-
-  const handleAvengerTargetPick = (targetId: number) => {
-    playSound('dramatic');
-    const targetPlayer = players.find((p) => p.id === targetId);
-
-    // If Mr. Avenger targets Mr. White, grant Mr. White their standard final word-guess chance
-    if (targetPlayer?.role === 'mrwhite' && relatedWords && relatedWords.length > 0) {
-      const updatedAvengerOnly = players.map((p) =>
-        p.id === pendingAvengerId
-          ? { ...p, isEliminated: true, specialAbilityUsed: true }
-          : p
-      );
-      setPendingAvengerId(null);
-      setPlayers(updatedAvengerOnly);
-      setMostVotedPlayerId(targetId);
-      navigate(GamePhase.IMPOSTOR_GUESS);
-      return;
-    }
-
-    const targetHasLovers =
-      targetPlayer?.specialRole === 'lovers' || targetPlayer?.role === 'lovers';
-    const partnerId = targetHasLovers ? targetPlayer?.loverPartnerId : undefined;
-
-    const updatedPlayers = players.map((p) => {
-      if (
-        p.id === targetId ||
-        p.id === pendingAvengerId ||
-        (partnerId !== undefined && p.id === partnerId)
-      ) {
-        return { ...p, isEliminated: true, specialAbilityUsed: true };
-      }
-      return p;
-    });
-
-    setPendingAvengerId(null);
-    setPlayers(updatedPlayers);
-    evaluateWinOrContinue(updatedPlayers);
-  };
-
-  const finalizeVoteVictim = (
-    target: Player,
-    shieldedTargetId?: number | null
-  ) => {
-    const unusedProtector = players.find(
-      (p) =>
-        !p.isEliminated &&
-        (p.specialRole === 'protector' || p.role === 'protector') &&
-        !p.specialAbilityUsed
-    );
-
-    const hasExplicitShield =
-      shieldedTargetId !== null && shieldedTargetId !== undefined && Boolean(unusedProtector);
-
-    // If Mr. Shield deployed the shield this round, consume the shield and protect that target
-    if (hasExplicitShield && unusedProtector) {
-      setPlayers((prev) =>
-        prev.map((p) => (p.id === unusedProtector.id ? { ...p, specialAbilityUsed: true } : p))
-      );
-      if (target.id === shieldedTargetId) {
-        setBlockedBySpecial('protector');
-        setMostVotedPlayerId(target.id);
-        navigate(GamePhase.REVEAL_VOTE_RESULT);
-        return;
-      }
-    } else if (
-      (target.specialRole === 'protector' || target.role === 'protector') &&
-      !target.specialAbilityUsed
-    ) {
-      // Passive fallback: if Mr. Shield kept his shield unused and was targeted directly
-      setPlayers((prev) =>
-        prev.map((p) => (p.id === target.id ? { ...p, specialAbilityUsed: true } : p))
-      );
-      setBlockedBySpecial('protector');
-      setMostVotedPlayerId(target.id);
-      navigate(GamePhase.REVEAL_VOTE_RESULT);
-      return;
-    }
-
-    // Preview non-Mr.White special exit notices on RevealVoteResult
-    if (target.role !== 'mrwhite') {
-      const isFirstElim = !players.some((p) => p.isEliminated);
-      const hasFool = target.specialRole === 'fool' || target.role === 'fool';
-      if (isFirstElim && hasFool) {
-        setFoolBonusTriggered(true);
-      }
-
-      const hasLovers = target.specialRole === 'lovers' || target.role === 'lovers';
-      if (hasLovers && target.loverPartnerId !== undefined) {
-        const partner = players.find(
-          (p) => !p.isEliminated && p.id === target.loverPartnerId
-        );
-        if (partner) setLoversPartnerName(partner.name);
-      }
-    }
-
-    setMostVotedPlayerId(target.id);
-    navigate(GamePhase.REVEAL_VOTE_RESULT);
-  };
-
-  const resolveVoteTarget = (
-    targetId: number,
-    votes: Record<number, number>,
-    meta?: VoteCompletionMeta
-  ) => {
-    setBlockedBySpecial(null);
-    setBouncedFromName(null);
-    setFoolBonusTriggered(false);
-    setLoversPartnerName(null);
-
-    const votedPlayer = players.find((p) => p.id === targetId);
-    if (!votedPlayer) return;
-
-    // Explicit Mr. Shield protection overrides everything (protects chosen target cleanly)
-    if (meta?.shieldedTargetId === votedPlayer.id) {
-      finalizeVoteVictim(votedPlayer, meta.shieldedTargetId);
-      return;
-    }
-
-    // Mr. Boomerang one-time counter-reflection: ALWAYS bounces onto an accuser/voter
-    const hasBoomerang =
-      votedPlayer.specialRole === 'boomerang' || votedPlayer.role === 'boomerang';
-    if (hasBoomerang && !votedPlayer.specialAbilityUsed) {
-      setPlayers((prev) =>
-        prev.map((p) => (p.id === votedPlayer.id ? { ...p, specialAbilityUsed: true } : p))
-      );
-
-      if (!meta?.isGroupVote) {
-        const nonSelfVoters = Object.entries(votes)
-          .filter(([vId, tId]) => tId === votedPlayer.id && Number(vId) !== votedPlayer.id)
-          .map(([vId]) => Number(vId));
-        const aliveVoters = nonSelfVoters.filter(
-          (id) => !players.find((p) => p.id === id)?.isEliminated
-        );
-        const bouncePool = aliveVoters.length > 0 ? aliveVoters : nonSelfVoters;
-
-        if (bouncePool.length > 0) {
-          const bouncedId = bouncePool[Math.floor(Math.random() * bouncePool.length)];
-          const bouncedPlayer = players.find((p) => p.id === bouncedId);
-          if (bouncedPlayer) {
-            setBouncedFromName(votedPlayer.name);
-            finalizeVoteVictim(bouncedPlayer, meta?.shieldedTargetId);
-            return;
-          }
-        }
-      }
-
-      // In Group Vote (or no non-self voter tracked), let Mr. Boomerang pick an accuser to hit back
-      const otherAlivePlayers = players.filter((p) => !p.isEliminated && p.id !== votedPlayer.id);
-      if (otherAlivePlayers.length > 0) {
-        setPendingVoteMeta(meta || null);
-        setPendingBoomerangId(votedPlayer.id);
-        return;
-      }
-    }
-
-    finalizeVoteVictim(votedPlayer, meta?.shieldedTargetId);
-  };
-
-  const handleBoomerangTargetPick = (targetId: number) => {
-    const boomerangPlayer =
-      pendingBoomerangId !== null ? players.find((p) => p.id === pendingBoomerangId) : null;
-    const victim = players.find((p) => p.id === targetId);
-    const savedMeta = pendingVoteMeta;
-    setPendingBoomerangId(null);
-    setPendingVoteMeta(null);
-
-    if (!victim) return;
-    playSound('dramatic');
-    if (boomerangPlayer) {
-      setBouncedFromName(boomerangPlayer.name);
-    }
-    finalizeVoteVictim(victim, savedMeta?.shieldedTargetId);
-  };
-
-  const handleVotingComplete = (votes: Record<number, number>, meta?: VoteCompletionMeta) => {
-    setVoteData(votes);
-    setPendingVoteMeta(meta || null);
-
-    const voteCounts: Record<number, number> = {};
-    Object.values(votes).forEach((suspectId) => {
-      voteCounts[suspectId] = (voteCounts[suspectId] || 0) + 1;
-    });
-
-    let maxVotes = 0;
-    let candidates: number[] = [];
-
-    Object.entries(voteCounts).forEach(([idStr, count]) => {
-      const id = parseInt(idStr, 10);
-      if (count > maxVotes) {
-        maxVotes = count;
-        candidates = [id];
-      } else if (count === maxVotes) {
-        candidates.push(id);
-      }
-    });
-
-    if (candidates.length > 1) {
-      const justicePlayer = players.find(
-        (p) => p.specialRole === 'justice' || p.role === 'justice'
-      );
-      if (justicePlayer) {
-        setPendingTieCandidates(candidates);
-        return;
-      }
-      const randomTieLoser = candidates[Math.floor(Math.random() * candidates.length)];
-      resolveVoteTarget(randomTieLoser, votes, meta);
-      return;
-    }
-
-    resolveVoteTarget(candidates[0], votes, meta);
-  };
-
-  const handleRevealNext = () => {
-    const votedPlayer = players.find((p) => p.id === mostVotedPlayerId);
-    if (!votedPlayer) return;
-
-    if (blockedBySpecial) {
-      setCurrentRound((prev) => prev + 1);
-      setVoteData({});
-      setMostVotedPlayerId(null);
-      setBlockedBySpecial(null);
-      setBouncedFromName(null);
-      setFoolBonusTriggered(false);
-      setLoversPartnerName(null);
-      navigate(GamePhase.PLAYING);
-      return;
-    }
-
-    if (votedPlayer.role === 'mrwhite') {
-      navigate(GamePhase.IMPOSTOR_GUESS);
-    } else {
-      eliminatePlayerAndCheckWin(votedPlayer.id);
-    }
-  };
-
-  const handleImpostorGuess = (isCorrect: boolean) => {
-    if (isCorrect) {
-      setWinReason('impostor_guessed');
-      handleGameEnd('impostor', 'impostor_guessed', undefined, undefined, mostVotedPlayerId);
-      navigate(GamePhase.RESULT);
-    } else {
-      eliminatePlayerAndCheckWin(mostVotedPlayerId!);
-    }
-  };
-
-  const handleGameEnd = (
-    winner: 'impostor' | 'citizens' | 'fool',
-    reason?: string,
-    _explicitVotes?: Record<number, number>,
-    playersOverride?: Player[],
-    winningMrWhiteId?: number | null
-  ) => {
-    const resolvedWinner: 'impostor' | 'citizens' =
-      winner === 'fool' ? 'citizens' : winner;
-    const effectiveReason = reason ?? winReason;
-    setLastWinner(resolvedWinner);
-    const sourcePlayers = playersOverride || players;
-
-    const updatedPlayers = sourcePlayers.map((p) => {
-      const pointsToAdd = getPlayerRoundPoints(
-        p,
-        sourcePlayers,
-        resolvedWinner,
-        effectiveReason,
-        winningMrWhiteId
-      );
-
-      if (pointsToAdd > 0) {
-        updatePlayerScore(p.name, pointsToAdd);
-        return { ...p, score: p.score + pointsToAdd };
-      }
-      return p;
-    });
-    setPlayers(updatedPlayers);
-  };
-
-  const handlePlayAgain = async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const { civilianWord, undercoverWord: ucWord, decoys } = await getRandomWordPair(
-        undefined,
-        gameSettings.category
-      );
-      initializeGame(tempPlayers, civilianWord, ucWord, decoys, gameSettings);
-    } catch (err) {
-      console.error(err);
-      setError(t('errorLoadingWords'));
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   const handleGoHome = () => {
@@ -760,10 +159,7 @@ function AppContent() {
     const uid = auth.currentUser?.uid;
     setShowExitConfirmation(false);
     setCurrentRoomId(null);
-    setPendingTieCandidates(null);
-    setPendingAvengerId(null);
-    setPendingBoomerangId(null);
-    setPendingVoteMeta(null);
+    offline.resetPendingSpecialModals();
     navigate(GamePhase.WELCOME);
 
     if (roomToLeave && uid) {
@@ -775,7 +171,6 @@ function AppContent() {
     }
   };
 
-  // Online Handlers
   const handleCreateRoom = async (settings: {
     maxPlayers: number;
     language: string;
@@ -788,46 +183,54 @@ function AppContent() {
       navigate(GamePhase.PROFILE);
       return;
     }
+    if (onlineBusy) return;
+    setOnlineBusy(true);
     try {
-      const roomRef = await addDoc(collection(db, 'rooms'), {
-        hostId: auth.currentUser.uid,
-        hostName: auth.currentUser.displayName || t('newPlayer'),
-        hostAvatar:
-          auth.currentUser.photoURL ||
-          `https://api.dicebear.com/7.x/avataaars/svg?seed=${auth.currentUser.uid}`,
-        status: 'waiting',
+      const { roomId } = await createOnlineRoom({
         maxPlayers: settings.maxPlayers,
         language: settings.language,
         isPrivate: settings.isPrivate,
         category: settings.category || 'standard',
         difficulty: settings.difficulty || 'easy',
         turnDurationSeconds: settings.turnDurationSeconds || 45,
-        secretCode: Math.floor(100000 + Math.random() * 900000).toString(),
-        players: [],
-        kickedPlayers: [],
-        messages: [],
-        createdAt: serverTimestamp(),
       });
-
-      setCurrentRoomId(roomRef.id);
+      setCurrentRoomId(roomId);
       navigate(GamePhase.ONLINE_LOBBY);
     } catch (err) {
       console.error('Error creating room:', err);
       showToast(t('errorOccurred'), 'error');
+    } finally {
+      setOnlineBusy(false);
     }
   };
 
-  const handleJoinRoom = (roomId: string) => {
+  const handleJoinRoom = async (roomId: string) => {
     if (!auth.currentUser) {
       navigate(GamePhase.PROFILE);
       return;
     }
-    setCurrentRoomId(roomId);
-    navigate(GamePhase.ONLINE_LOBBY);
-  };
-
-  const handleStartOnlineGame = () => {
-    navigate(GamePhase.ONLINE_GAME);
+    if (onlineBusy) return;
+    setOnlineBusy(true);
+    try {
+      const res = await joinOnlineRoom({ roomId });
+      if (res.success && res.roomId) {
+        setCurrentRoomId(res.roomId);
+        navigate(GamePhase.ONLINE_LOBBY);
+      } else {
+        const msgKey =
+          res.reason === 'kickedFromRoom'
+            ? 'kickedFromRoom'
+            : res.reason === 'roomFull' || res.reason === 'matchAlreadyStarted'
+            ? 'roomFull'
+            : 'roomNotFound';
+        showToast(t(msgKey), 'warning');
+      }
+    } catch (err) {
+      console.error('Error joining room:', err);
+      showToast(t('errorOccurred'), 'error');
+    } finally {
+      setOnlineBusy(false);
+    }
   };
 
   const handleLeaveOnlineToRooms = () => {
@@ -847,13 +250,15 @@ function AppContent() {
     duration: 0.28,
   };
 
-  const justicePlayer = players.find(
-    (p) => p.specialRole === 'justice' || p.role === 'justice'
-  );
+  const justicePlayer = offline.players.find((p) => hasSpecialRole(p, 'justice'));
   const avengerPlayer =
-    pendingAvengerId !== null ? players.find((p) => p.id === pendingAvengerId) : null;
+    offline.pendingAvengerId !== null
+      ? offline.players.find((p) => p.id === offline.pendingAvengerId)
+      : null;
   const boomerangPlayer =
-    pendingBoomerangId !== null ? players.find((p) => p.id === pendingBoomerangId) : null;
+    offline.pendingBoomerangId !== null
+      ? offline.players.find((p) => p.id === offline.pendingBoomerangId)
+      : null;
 
   return (
     <div
@@ -868,16 +273,16 @@ function AppContent() {
       <ToastHost />
       {phase !== GamePhase.WELCOME && <Header onHome={handleGoHome} showHome={true} />}
 
-      {error && (
+      {offline.error && (
         <div className="mx-auto mt-2 px-4 py-2 rounded-xl bg-rose-500/20 border border-rose-400/50 text-rose-200 text-xs font-black z-30 flex items-center gap-3">
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="underline">
+          <span>{offline.error}</span>
+          <button onClick={() => offline.setError(null)} className="underline">
             {t('ok')}
           </button>
         </div>
       )}
 
-      {isLoading && (
+      {(offline.isLoading || onlineBusy) && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center">
           <div className="bg-bg-surface border border-border-strong rounded-3xl px-8 py-6 text-center shadow-2xl">
             <div className="w-10 h-10 border-4 border-sky-400 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
@@ -899,16 +304,16 @@ function AppContent() {
               className="w-full h-full"
             >
               <WelcomeScreen
-                onStart={startGameSetup}
+                onStart={() => navigate(GamePhase.SETUP)}
                 onShowScoreboard={() => navigate(GamePhase.SCOREBOARD)}
-                onManagePlayers={handleManagePlayers}
+                onManagePlayers={() => navigate(GamePhase.PLAYERS_LIST)}
                 onOpenSettings={() => navigate(GamePhase.SETTINGS)}
                 onShowRules={() => navigate(GamePhase.RULES)}
                 onShowProfile={() => navigate(GamePhase.PROFILE)}
                 onShowOnline={() => navigate(GamePhase.ONLINE_ROOMS)}
                 onShowDictionary={() => navigate(GamePhase.DICTIONARY)}
                 onShowInventory={() => navigate(GamePhase.INVENTORY)}
-                onLanguageChange={handleLanguageChange}
+                onLanguageChange={setCurrentLanguage}
                 currentTheme={currentTheme}
               />
             </motion.div>
@@ -988,7 +393,7 @@ function AppContent() {
               <OnlineLobbyScreen
                 roomId={currentRoomId}
                 onBack={handleLeaveOnlineToRooms}
-                onStartGame={handleStartOnlineGame}
+                onStartGame={() => navigate(GamePhase.ONLINE_GAME)}
               />
             </motion.div>
           )}
@@ -1036,8 +441,8 @@ function AppContent() {
               className="w-full h-full"
             >
               <GameSettingsScreen
-                playersCount={tempPlayers.length}
-                onStart={handleGameSettingsConfirmed}
+                playersCount={offline.tempPlayers.length}
+                onStart={offline.handleGameSettingsConfirmed}
                 onBack={handleGoHome}
                 onEditPlayers={() => navigate(GamePhase.SETUP)}
               />
@@ -1069,14 +474,14 @@ function AppContent() {
               className="w-full h-full"
             >
               <GameRound
-                players={players}
-                rolePool={rolePool}
-                specialRolePool={specialRolePool}
-                secretWord={secretWord}
-                undercoverWord={undercoverWord}
-                relatedWords={relatedWords}
-                difficulty={gameSettings.difficulty}
-                onAssignRole={setPlayerRole}
+                players={offline.players}
+                rolePool={offline.rolePool}
+                specialRolePool={offline.specialRolePool}
+                secretWord={offline.secretWord}
+                undercoverWord={offline.undercoverWord}
+                relatedWords={offline.relatedWords}
+                difficulty={offline.gameSettings.difficulty}
+                onAssignRole={offline.setPlayerRole}
                 onAllRevealed={() => navigate(GamePhase.PLAYING)}
               />
             </motion.div>
@@ -1093,16 +498,16 @@ function AppContent() {
               className="w-full h-full"
             >
               <QuestionPhase
-                players={players}
+                players={offline.players}
                 onTimeUp={() => navigate(GamePhase.VOTING)}
-                gameMode={gameSettings.gameMode}
-                difficulty={gameSettings.difficulty}
-                currentRound={currentRound}
-                turnDurationSeconds={gameSettings.turnDurationSeconds}
-                secretWord={secretWord}
-                undercoverWord={undercoverWord}
-                descriptionsLog={descriptionsLog}
-                onAddDescription={(entry) => setDescriptionsLog((prev) => [...prev, entry])}
+                gameMode={offline.gameSettings.gameMode}
+                difficulty={offline.gameSettings.difficulty}
+                currentRound={offline.currentRound}
+                turnDurationSeconds={offline.gameSettings.turnDurationSeconds}
+                secretWord={offline.secretWord}
+                undercoverWord={offline.undercoverWord}
+                descriptionsLog={offline.descriptionsLog}
+                onAddDescription={(entry) => offline.setDescriptionsLog((prev) => [...prev, entry])}
               />
             </motion.div>
           )}
@@ -1118,7 +523,7 @@ function AppContent() {
               className="w-full h-full"
             >
               <DiscussionPhase
-                players={players}
+                players={offline.players}
                 onTimeUp={() => navigate(GamePhase.VOTING)}
                 onSkip={() => navigate(GamePhase.VOTING)}
               />
@@ -1136,15 +541,15 @@ function AppContent() {
               className="w-full h-full"
             >
               <VotingScreen
-                players={players}
-                onVoteComplete={handleVotingComplete}
-                currentRound={currentRound}
-                difficulty={gameSettings.difficulty}
+                players={offline.players}
+                onVoteComplete={offline.handleVotingComplete}
+                currentRound={offline.currentRound}
+                difficulty={offline.gameSettings.difficulty}
               />
             </motion.div>
           )}
 
-          {phase === GamePhase.REVEAL_VOTE_RESULT && mostVotedPlayerId !== null && (
+          {phase === GamePhase.REVEAL_VOTE_RESULT && offline.mostVotedPlayerId !== null && (
             <motion.div
               key="reveal_vote_result"
               initial="initial"
@@ -1155,17 +560,17 @@ function AppContent() {
               className="w-full h-full"
             >
               <RevealVoteResult
-                votedPlayerId={mostVotedPlayerId}
-                impostorId={players[impostorIndex]?.id ?? -1}
-                undercoverId={players.find((p) => p.role === 'undercover')?.id}
-                players={players}
-                onNext={handleRevealNext}
-                voters={players.filter((p) => voteData[p.id] === mostVotedPlayerId)}
+                votedPlayerId={offline.mostVotedPlayerId}
+                impostorId={offline.players[offline.impostorIndex]?.id ?? -1}
+                undercoverId={offline.players.find((p) => p.role === 'undercover')?.id}
+                players={offline.players}
+                onNext={offline.handleRevealNext}
+                voters={offline.players.filter((p) => offline.voteData[p.id] === offline.mostVotedPlayerId)}
                 isOnline={false}
-                blockedBySpecial={blockedBySpecial}
-                bouncedFromName={bouncedFromName}
-                foolBonusTriggered={foolBonusTriggered}
-                loversPartnerName={loversPartnerName}
+                blockedBySpecial={offline.blockedBySpecial}
+                bouncedFromName={offline.bouncedFromName}
+                foolBonusTriggered={offline.foolBonusTriggered}
+                loversPartnerName={offline.loversPartnerName}
               />
             </motion.div>
           )}
@@ -1182,14 +587,14 @@ function AppContent() {
             >
               <ImpostorGuessScreen
                 impostor={
-                  players.find((p) => p.id === mostVotedPlayerId) ||
-                  players[impostorIndex] ||
-                  players[0]
+                  offline.players.find((p) => p.id === offline.mostVotedPlayerId) ||
+                  offline.players[offline.impostorIndex] ||
+                  offline.players[0]
                 }
-                secretWord={secretWord}
-                undercoverWord={undercoverWord}
-                relatedWords={relatedWords}
-                onGuess={handleImpostorGuess}
+                secretWord={offline.secretWord}
+                undercoverWord={offline.undercoverWord}
+                relatedWords={offline.relatedWords}
+                onGuess={offline.handleImpostorGuess}
               />
             </motion.div>
           )}
@@ -1205,16 +610,18 @@ function AppContent() {
               className="w-full h-full"
             >
               <ResultScreen
-                players={players}
-                impostorIndex={impostorIndex}
-                secretWord={secretWord}
-                undercoverWord={undercoverWord}
-                voteData={voteData}
-                onGameEnd={(w) => handleGameEnd(w)}
+                players={offline.players}
+                impostorIndex={offline.impostorIndex}
+                secretWord={offline.secretWord}
+                undercoverWord={offline.undercoverWord}
+                voteData={offline.voteData}
+                onGameEnd={(w) => offline.handleGameEnd(w)}
                 onNext={() => navigate(GamePhase.SCOREBOARD)}
-                roundWinner={lastWinner}
-                winReason={winReason}
-                winningMrWhiteId={winReason === 'impostor_guessed' ? mostVotedPlayerId : null}
+                roundWinner={offline.lastWinner}
+                winReason={offline.winReason}
+                winningMrWhiteId={
+                  offline.winReason === 'impostor_guessed' ? offline.mostVotedPlayerId : null
+                }
               />
             </motion.div>
           )}
@@ -1231,7 +638,7 @@ function AppContent() {
             >
               <ScoreboardScreen
                 onBack={handleGoHome}
-                onNextRound={tempPlayers.length > 0 ? handlePlayAgain : undefined}
+                onNextRound={offline.tempPlayers.length > 0 ? offline.handlePlayAgain : undefined}
               />
             </motion.div>
           )}
@@ -1248,9 +655,9 @@ function AppContent() {
             >
               <SettingsScreen
                 onBack={handleGoHome}
-                onThemeChange={handleThemeChange}
-                onButtonColorChange={handleButtonColorChange}
-                onLanguageChange={handleLanguageChange}
+                onThemeChange={setCurrentTheme}
+                onButtonColorChange={setCurrentButtonColor}
+                onLanguageChange={setCurrentLanguage}
               />
             </motion.div>
           )}
@@ -1273,7 +680,7 @@ function AppContent() {
 
       {/* Mr. Justice Tiebreaker Modal */}
       <AnimatePresence>
-        {pendingTieCandidates && justicePlayer && (
+        {offline.pendingTieCandidates && justicePlayer && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -1303,18 +710,13 @@ function AppContent() {
                   : 'Tie vote! Choose which tied player gets eliminated:'}
               </p>
               <div className="grid grid-cols-2 gap-3">
-                {pendingTieCandidates.map((candId) => {
-                  const cand = players.find((p) => p.id === candId);
+                {offline.pendingTieCandidates.map((candId) => {
+                  const cand = offline.players.find((p) => p.id === candId);
                   if (!cand) return null;
                   return (
                     <button
                       key={cand.id}
-                      onClick={() => {
-                        playSound('vote');
-                        const savedMeta = pendingVoteMeta;
-                        setPendingTieCandidates(null);
-                        resolveVoteTarget(cand.id, voteData, savedMeta || undefined);
-                      }}
+                      onClick={() => offline.resolveTieWithJustice(cand.id)}
                       className="p-3 rounded-2xl bg-white/5 hover:bg-emerald-500/20 border border-white/15 hover:border-emerald-400 flex flex-col items-center gap-2 transition-all"
                     >
                       <Avatar avatar={cand.avatar} name={cand.name} size={56} />
@@ -1330,7 +732,7 @@ function AppContent() {
         )}
       </AnimatePresence>
 
-      {/* Mr. Boomerang Reflection Picker Modal (Group Vote) */}
+      {/* Mr. Boomerang Reflection Picker Modal */}
       <AnimatePresence>
         {boomerangPlayer && (
           <motion.div
@@ -1362,12 +764,12 @@ function AppContent() {
                   : 'Counter-bounce activated! Pick an accuser to take the elimination instead:'}
               </p>
               <div className="grid grid-cols-3 gap-2.5 max-h-64 overflow-y-auto">
-                {players
+                {offline.players
                   .filter((p) => !p.isEliminated && p.id !== boomerangPlayer.id)
                   .map((target) => (
                     <button
                       key={target.id}
-                      onClick={() => handleBoomerangTargetPick(target.id)}
+                      onClick={() => offline.handleBoomerangTargetPick(target.id)}
                       className="p-2.5 rounded-2xl bg-white/5 hover:bg-rose-500/20 border border-white/15 hover:border-rose-400 flex flex-col items-center gap-1.5 transition-all"
                     >
                       <Avatar avatar={target.avatar} name={target.name} size={46} />
@@ -1414,12 +816,12 @@ function AppContent() {
                   : 'Take your revenge! Pick one player to eliminate with you:'}
               </p>
               <div className="grid grid-cols-3 gap-2.5 max-h-64 overflow-y-auto">
-                {players
+                {offline.players
                   .filter((p) => !p.isEliminated)
                   .map((target) => (
                     <button
                       key={target.id}
-                      onClick={() => handleAvengerTargetPick(target.id)}
+                      onClick={() => offline.handleAvengerTargetPick(target.id)}
                       className="p-2.5 rounded-2xl bg-white/5 hover:bg-orange-500/20 border border-white/15 hover:border-orange-400 flex flex-col items-center gap-1.5 transition-all"
                     >
                       <Avatar avatar={target.avatar} name={target.name} size={46} />

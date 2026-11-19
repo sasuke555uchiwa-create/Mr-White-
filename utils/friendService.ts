@@ -1,70 +1,51 @@
-import { collection, addDoc, query, where, getDocs, serverTimestamp, doc, updateDoc, deleteDoc } from 'firebase/firestore';
-import { db } from '../firebase';
-import { handleFirestoreError, OperationType } from './firestoreErrorHandler';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from '../firebase';
 
-export const sendFriendRequest = async (fromId: string, toId: string) => {
+export const sendFriendRequest = async (
+  _fromId: string,
+  toId: string
+): Promise<{ success: boolean; message: string }> => {
   try {
-    // Check if request already exists
-    const q1 = query(collection(db, 'friendRequests'), where('fromId', '==', fromId));
-    const q2 = query(collection(db, 'friendRequests'), where('toId', '==', fromId));
-    
-    const [snap1, snap2] = await Promise.all([getDocs(q1), getDocs(q2)]);
-    
-    const reqExists = snap1.docs.some(d => d.data().toId === toId) || snap2.docs.some(d => d.data().fromId === toId);
-    if (reqExists) {
-      return { success: false, message: 'friendRequestExists' };
-    }
-
-    // Check if already friends
-    const fq1 = query(collection(db, 'friendships'), where('user1', '==', fromId));
-    const fq2 = query(collection(db, 'friendships'), where('user2', '==', fromId));
-    
-    const [fsnap1, fsnap2] = await Promise.all([getDocs(fq1), getDocs(fq2)]);
-    
-    const friendExists = fsnap1.docs.some(d => d.data().user2 === toId) || fsnap2.docs.some(d => d.data().user1 === toId);
-    if (friendExists) {
-      return { success: false, message: 'alreadyFriends' };
-    }
-
-    await addDoc(collection(db, 'friendRequests'), {
-      fromId,
-      toId,
-      status: 'pending',
-      createdAt: serverTimestamp()
-    });
-    
-    return { success: true, message: 'friendRequestSent' };
+    const callable = httpsCallable<{ toId: string }, { success: boolean; message: string }>(
+      functions,
+      'sendFriendRequest'
+    );
+    const res = await callable({ toId });
+    return res.data;
   } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, 'friendRequests');
+    console.error('Error sending friend request:', error);
     return { success: false, message: 'errorSendingRequest' };
   }
 };
 
-export const acceptFriendRequest = async (requestId: string, fromId: string, toId: string) => {
+export const acceptFriendRequest = async (
+  requestId: string,
+  _fromId?: string,
+  _toId?: string
+): Promise<{ success: boolean }> => {
   try {
-    const reqRef = doc(db, 'friendRequests', requestId);
-    await updateDoc(reqRef, { status: 'accepted' });
-    
-    await addDoc(collection(db, 'friendships'), {
-      user1: fromId,
-      user2: toId,
-      createdAt: serverTimestamp()
-    });
-    
-    return { success: true };
+    const callable = httpsCallable<{ requestId: string }, { success: boolean }>(
+      functions,
+      'acceptFriendRequest'
+    );
+    const res = await callable({ requestId });
+    return res.data;
   } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `friendRequests/${requestId}`);
+    console.error('Error accepting friend request:', error);
     return { success: false };
   }
 };
 
-export const rejectFriendRequest = async (requestId: string) => {
+export const rejectFriendRequest = async (requestId: string): Promise<{ success: boolean }> => {
   try {
-    const reqRef = doc(db, 'friendRequests', requestId);
-    await deleteDoc(reqRef);
-    return { success: true };
+    const callable = httpsCallable<{ requestId: string }, { success: boolean }>(
+      functions,
+      'rejectFriendRequest'
+    );
+    const res = await callable({ requestId });
+    return res.data;
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, `friendRequests/${requestId}`);
+    console.error('Error rejecting friend request:', error);
     return { success: false };
   }
 };
