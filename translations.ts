@@ -282,6 +282,7 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "difficultyEasyDesc": "يظهر لكل لاعب دوره",
     "difficultyHardDesc": "تُخفى الأدوار عن المدنيين والمتخفين (وضع أعمى)",
     "roleDistribution": "توزيع الأدوار",
+    "onlineClassicRolesNote": "اللعب أونلاين يستخدم الأدوار الكلاسيكية فقط (مدني، متخفٍ، Mr. White). الأدوار الخاصة متاحة في اللعب المحلي.",
     "citizens": "المدنيون",
     "standardWords": "قياسية",
     "animals": "حيوانات",
@@ -321,7 +322,9 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "forceEndVote": "إنهاء التصويت الآن",
     "tieBrokenNotice": "حدث تعادل في الأصوات! تم الحسم بالقرعة",
     "backToLobby": "العودة لغرفة الانتظار",
-    "autoSetupSummary": "توزيع تلقائي للأدوار"
+    "autoSetupSummary": "توزيع تلقائي للأدوار",
+    "errorOccurred": "حدث خطأ غير متوقع، يرجى المحاولة مرة أخرى.",
+    "onlineBackendUnavailable": "خادم اللعب أونلاين (Cloud Functions) غير مُفعّل أو غير متصل حالياً على هذا المشروع. يمكنك الاستمتاع باللعب المحلي الكامل أو نشر الدوال السحابية لتفعيل الأونلاين."
   },
   "en": {
     "exitGameConfirmation": "Are you sure you want to leave the game?",
@@ -606,6 +609,7 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "difficultyEasyDesc": "Roles are shown to players",
     "difficultyHardDesc": "Roles are hidden (except Mr. White)",
     "roleDistribution": "Role Distribution",
+    "onlineClassicRolesNote": "Online matches use classic roles only (Citizen, Undercover, Mr. White). Special Roles are local Pass & Play only.",
     "standardWords": "Standard",
     "animals": "Animals",
     "food": "Food",
@@ -644,7 +648,9 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "forceEndVote": "End Voting Now",
     "tieBrokenNotice": "Tie vote! A tiebreaker selected a player",
     "backToLobby": "Back to Lobby",
-    "autoSetupSummary": "Smart auto role scaling"
+    "autoSetupSummary": "Smart auto role scaling",
+    "errorOccurred": "An unexpected error occurred. Please try again.",
+    "onlineBackendUnavailable": "The online game backend (Cloud Functions) is not deployed on this Firebase project yet. Play Offline works fully, or deploy Firebase Functions to enable online rooms."
   },
   "fr": {
     "exitGameConfirmation": "Êtes-vous sûr de vouloir quitter la partie ?",
@@ -850,6 +856,7 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "voteNow": "Voter maintenant",
     "remainingIntruders": "Intrus restants",
     "specialRoles": "Rôles spéciaux",
+    "onlineClassicRolesNote": "Le mode en ligne utilise uniquement les rôles classiques (Citoyen, Infiltré, Mr. White). Les rôles spéciaux sont en mode local.",
     "none": "Aucun",
     "endAndVote": "Terminer et voter",
     "waitingForHostToStartVote": "En attente que l'hôte lance le vote",
@@ -892,7 +899,9 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "forceEndVote": "Terminer le vote",
     "tieBrokenNotice": "Égalité ! Tirage au sort appliqué",
     "backToLobby": "Retour au salon",
-    "autoSetupSummary": "Répartition automatique des rôles"
+    "autoSetupSummary": "Répartition automatique des rôles",
+    "errorOccurred": "Une erreur inattendue est survenue. Veuillez réessayer.",
+    "onlineBackendUnavailable": "Le serveur de jeu en ligne (Cloud Functions) n'est pas encore déployé sur ce projet Firebase. Le mode hors ligne fonctionne pleinement."
   },
   "es": {
     "settings": "Ajustes",
@@ -918,6 +927,7 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "wordCategory": "Categoría de palabras",
     "gameSettings": "Ajustes de la partida",
     "roleDistribution": "Distribución de roles",
+    "onlineClassicRolesNote": "El modo en línea usa solo roles clásicos (Ciudadano, Infiltrado, Mr. White). Los roles especiales son solo locales.",
     "citizens": "Ciudadanos",
     "undercover": "Infiltrado",
     "mrWhite": "Mr. White",
@@ -939,7 +949,9 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "playersLabel": "Jugadores",
     "playersList": "Lista de jugadores",
     "save": "Guardar",
-    "noPermission": "No tienes permiso para realizar esta acción."
+    "noPermission": "No tienes permiso para realizar esta acción.",
+    "errorOccurred": "Ocurrió un error inesperado. Inténtalo de nuevo.",
+    "onlineBackendUnavailable": "El servidor en línea (Cloud Functions) aún no está desplegado en este proyecto Firebase."
   },
   "de": {
     "settings": "Einstellungen",
@@ -965,6 +977,7 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "wordCategory": "Wortkategorie",
     "gameSettings": "Spieleinstellungen",
     "roleDistribution": "Rollenverteilung",
+    "onlineClassicRolesNote": "Online-Spiele nutzen nur klassische Rollen (Bürger, Undercover, Mr. White). Spezialrollen sind nur lokal verfügbar.",
     "citizens": "Bürger",
     "undercover": "Undercover",
     "mrWhite": "Mr. White",
@@ -986,7 +999,9 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "playersLabel": "Spieler",
     "playersList": "Spielerliste",
     "save": "Speichern",
-    "noPermission": "Keine Berechtigung für diese Aktion."
+    "noPermission": "Keine Berechtigung für diese Aktion.",
+    "errorOccurred": "Ein unerwarteter Fehler ist aufgetreten. Bitte erneut versuchen.",
+    "onlineBackendUnavailable": "Das Online-Backend (Cloud Functions) ist für dieses Firebase-Projekt noch nicht bereitgestellt."
   },
   "tr": {
     "settings": "Ayarlar",
@@ -1012,6 +1027,7 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "wordCategory": "Kelime Kategorisi",
     "gameSettings": "Oyun Ayarları",
     "roleDistribution": "Rol Dağılımı",
+    "onlineClassicRolesNote": "Çevrimiçi maçlar yalnızca klasik rolleri kullanır (Vatandaş, Undercover, Mr. White). Özel roller yalnızca yerel oyundadır.",
     "citizens": "Vatandaşlar",
     "undercover": "Undercover",
     "mrWhite": "Mr. White",
@@ -1033,7 +1049,9 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "playersLabel": "Oyuncular",
     "playersList": "Oyuncu Listesi",
     "save": "Kaydet",
-    "noPermission": "Bu işlem için izniniz yok."
+    "noPermission": "Bu işlem için izniniz yok.",
+    "errorOccurred": "Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.",
+    "onlineBackendUnavailable": "Çevrimiçi oyun sunucusu (Cloud Functions) bu Firebase projesinde henüz dağıtılmamış."
   },
   "pt": {
     "settings": "Configurações",
@@ -1059,6 +1077,7 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "wordCategory": "Categoria de palavras",
     "gameSettings": "Configurações do jogo",
     "roleDistribution": "Distribuição de papéis",
+    "onlineClassicRolesNote": "Partidas online usam apenas papéis clássicos (Cidadão, Undercover, Mr. White). Papéis especiais são apenas locais.",
     "citizens": "Cidadãos",
     "undercover": "Undercover",
     "mrWhite": "Mr. White",
@@ -1080,7 +1099,9 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "playersLabel": "Jogadores",
     "playersList": "Lista de jogadores",
     "save": "Salvar",
-    "noPermission": "Você não tem permissão para realizar esta ação."
+    "noPermission": "Você não tem permissão para realizar esta ação.",
+    "errorOccurred": "Ocorreu um erro inesperado. Tente novamente.",
+    "onlineBackendUnavailable": "O servidor online (Cloud Functions) ainda não foi implantado neste projeto Firebase."
   }
 };
 

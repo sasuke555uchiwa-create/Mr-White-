@@ -3,6 +3,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useOnlineRoom } from '../hooks/useOnlineRoom';
 import {
   beginOnlineMatch,
+  getOnlineActionErrorKey,
   joinOnlineRoom,
   kickOnlinePlayer,
   leaveOnlineRoom,
@@ -155,7 +156,7 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
       await kickOnlinePlayer(roomId, playerId);
     } catch (error) {
       console.error('Kick failed:', error);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(error)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -170,7 +171,7 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
       await promoteOnlineHost(roomId, targetPlayer.uid);
     } catch (error) {
       console.error('Promote host failed:', error);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(error)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -183,7 +184,7 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
       await toggleOnlineReady(roomId);
     } catch (error) {
       console.error('Toggle ready failed:', error);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(error)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -196,7 +197,7 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
       await beginOnlineMatch(roomId);
     } catch (error) {
       console.error('Begin match failed:', error);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(error)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -266,7 +267,7 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
       setShowEditSettings(false);
     } catch (error) {
       console.error('Update room settings failed:', error);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(error)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -396,6 +397,9 @@ export const OnlineLobbyScreen: React.FC<OnlineLobbyScreenProps> = ({
           )}
         </div>
       </div>
+      <p className="text-[11px] font-bold text-text-muted px-2 mb-4 text-center">
+        {t('onlineClassicRolesNote')}
+      </p>
 
       {/* Players List */}
       <div className="mb-6">

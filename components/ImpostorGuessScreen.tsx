@@ -13,7 +13,7 @@ interface ImpostorGuessScreenProps {
   undercoverWord?: string;
   relatedWords?: string[];
   onGuess: (isCorrect: boolean) => void;
-  onSubmitGuessText?: (guess: string) => Promise<{ isCorrect: boolean; secretWord?: string }>;
+  onSubmitGuessText?: (guess: string) => Promise<{ isCorrect: boolean }>;
 }
 
 export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
@@ -26,7 +26,7 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
   const [hasGuessed, setHasGuessed] = useState(false);
   const [isCorrect, setIsCorrect] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [revealedWord, setRevealedWord] = useState(secretWord);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const settings = getSettings();
   const lang = settings.language;
@@ -51,14 +51,15 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
 
     if (onSubmitGuessText) {
       setSubmitting(true);
+      setSubmitError(null);
       try {
         const res = await onSubmitGuessText(trimmed);
-        setIsCorrect(res.isCorrect);
-        if (res.secretWord) {
-          setRevealedWord(res.secretWord);
-        }
+        const matched = Boolean(res?.isCorrect);
+        setIsCorrect(matched);
         setHasGuessed(true);
-        playSound(res.isCorrect ? 'mrWhiteWin' : 'trumpets_sad');
+        playSound(matched ? 'mrWhiteWin' : 'trumpets_sad');
+      } catch {
+        setSubmitError(lang === 'ar' ? 'تعذر إرسال التخمين، حاول مرة أخرى.' : 'Failed to submit guess.');
       } finally {
         setSubmitting(false);
       }
@@ -66,7 +67,6 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
     }
 
     const correct = isMrWhiteGuessMatch(trimmed, secretWord);
-    setRevealedWord(secretWord);
     setIsCorrect(correct);
     setHasGuessed(true);
     playSound(correct ? 'mrWhiteWin' : 'trumpets_sad');
@@ -131,6 +131,9 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
               >
                 {lang === 'ar' ? 'تأكيد التخمين' : t('ok')}
               </button>
+              {submitError && (
+                <p className="text-xs font-bold text-rose-400 mt-2">{submitError}</p>
+              )}
             </div>
           </>
         ) : (
@@ -148,7 +151,7 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
             </div>
 
             <h2
-              className={`text-2xl font-black mb-3 ${
+              className={`text-2xl font-black mb-5 ${
                 isCorrect ? 'text-emerald-400' : 'text-rose-400'
               }`}
             >
@@ -161,11 +164,11 @@ export const ImpostorGuessScreen: React.FC<ImpostorGuessScreenProps> = ({
                 : t('mrWhiteWrongGuess')}
             </h2>
 
-            {revealedWord && (
+            {!onSubmitGuessText && isCorrect && secretWord && (
               <p className="text-sm text-slate-300 mb-7 font-bold">
                 {lang === 'ar'
-                  ? `كلمة المدنيين كانت: "${revealedWord}"`
-                  : `Civilian word was: "${revealedWord}"`}
+                  ? `كلمة المدنيين كانت: "${secretWord}"`
+                  : `Civilian word was: "${secretWord}"`}
               </p>
             )}
 

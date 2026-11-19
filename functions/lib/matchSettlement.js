@@ -2,14 +2,12 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.readPlayerProfileDocs = readPlayerProfileDocs;
 exports.applyMatchSettlementWrites = applyMatchSettlementWrites;
-const firestore_1 = require("firebase-admin/firestore");
-const firebaseAdmin_1 = require("./firebaseAdmin");
 const gameLogic_1 = require("./gameLogic");
-async function readPlayerProfileDocs(tx, uids) {
+async function readPlayerProfileDocs(db, tx, uids) {
     const uniqueUids = Array.from(new Set(uids));
     const refs = uniqueUids.flatMap((uid) => [
-        firebaseAdmin_1.db.collection('users').doc(uid),
-        firebaseAdmin_1.db.collection('publicProfiles').doc(uid),
+        db.collection('users').doc(uid),
+        db.collection('publicProfiles').doc(uid),
     ]);
     const snaps = refs.length > 0 ? await tx.getAll(...refs) : [];
     const result = new Map();
@@ -26,7 +24,7 @@ async function readPlayerProfileDocs(tx, uids) {
     return result;
 }
 function applyMatchSettlementWrites(params) {
-    const { tx, roomRef, roomData, privateStateRef, privateState, players, profileMap, winner, winReason, winningMrWhiteUid = null, } = params;
+    const { db, serverTimestamp, tx, roomRef, roomData, privateStateRef, privateState, players, profileMap, winner, winReason, winningMrWhiteUid = null, extraRoomUpdates = {}, } = params;
     const alreadySettled = Array.isArray(privateState.settledMatches)
         ? privateState.settledMatches.includes(privateState.matchId)
         : false;
@@ -53,20 +51,34 @@ function applyMatchSettlementWrites(params) {
             const nextXp = currentXp + xpDelta;
             const nextLevel = (0, gameLogic_1.calculateLevelFromXp)(nextXp);
             const baseStats = baseUser.stats || {};
+            const roleKey = privateState.rolesByUid[p.uid] || 'citizen';
+            const prevRoleStats = baseStats.roleStats && typeof baseStats.roleStats === 'object' ? baseStats.roleStats : {};
+            const prevRoleEntry = prevRoleStats[roleKey] || {};
+            const nextRoleStats = {
+                ...prevRoleStats,
+                [roleKey]: {
+                    played: Number(prevRoleEntry.played || 0) + 1,
+                    wins: Number(prevRoleEntry.wins || 0) + (isWinner ? 1 : 0),
+                },
+            };
+            const nextCurrentStreak = isWinner ? Number(baseStats.currentStreak || 0) + 1 : 0;
+            const nextLongestStreak = Math.max(Number(baseStats.longestStreak || 0), nextCurrentStreak);
             const nextStats = {
                 wins: Number(baseStats.wins || 0) + (isWinner ? 1 : 0),
                 hosted: Number(baseStats.hosted || 0),
                 played: Number(baseStats.played || 0) + 1,
-                longestStreak: Number(baseStats.longestStreak || 0),
+                longestStreak: nextLongestStreak,
+                currentStreak: nextCurrentStreak,
+                roleStats: nextRoleStats,
             };
-            const userRef = firebaseAdmin_1.db.collection('users').doc(p.uid);
-            const pubRef = firebaseAdmin_1.db.collection('publicProfiles').doc(p.uid);
+            const userRef = db.collection('users').doc(p.uid);
+            const pubRef = db.collection('publicProfiles').doc(p.uid);
             if (entry.userExists) {
                 tx.update(userRef, {
                     xp: nextXp,
                     level: nextLevel,
                     stats: nextStats,
-                    updatedAt: firestore_1.FieldValue.serverTimestamp(),
+                    updatedAt: serverTimestamp(),
                 });
             }
             const displayName = (typeof baseUser.displayName === 'string' && baseUser.displayName) || p.name;
@@ -78,7 +90,7 @@ function applyMatchSettlementWrites(params) {
                     xp: nextXp,
                     level: nextLevel,
                     stats: nextStats,
-                    updatedAt: firestore_1.FieldValue.serverTimestamp(),
+                    updatedAt: serverTimestamp(),
                 });
             }
             else {
@@ -89,14 +101,15 @@ function applyMatchSettlementWrites(params) {
                     xp: nextXp,
                     level: nextLevel,
                     stats: nextStats,
-                    updatedAt: firestore_1.FieldValue.serverTimestamp(),
+                    updatedAt: serverTimestamp(),
                 });
             }
         }
         const nextSettled = [...(privateState.settledMatches || []), privateState.matchId].slice(-20);
         tx.update(privateStateRef, {
+            votesByUid: privateState.votesByUid || {},
             settledMatches: nextSettled,
-            updatedAt: firestore_1.FieldValue.serverTimestamp(),
+            updatedAt: serverTimestamp(),
         });
     }
     const publicGameState = {
@@ -117,9 +130,11 @@ function applyMatchSettlementWrites(params) {
         },
     };
     tx.update(roomRef, {
+        ...extraRoomUpdates,
         players: updatedPlayers,
+        playerIds: updatedPlayers.map((p) => p.uid),
         gameState: publicGameState,
-        updatedAt: firestore_1.FieldValue.serverTimestamp(),
+        updatedAt: serverTimestamp(),
     });
 }
 //# sourceMappingURL=matchSettlement.js.map

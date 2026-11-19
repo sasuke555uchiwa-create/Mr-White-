@@ -1,5 +1,6 @@
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '../firebase';
+import { isOnlineBackendUnavailableError } from './onlineRoomService';
 
 export const sendFriendRequest = async (
   _fromId: string,
@@ -13,8 +14,13 @@ export const sendFriendRequest = async (
     const res = await callable({ toId });
     return res.data;
   } catch (error) {
-    console.error('Error sending friend request:', error);
-    return { success: false, message: 'errorSendingRequest' };
+    console.warn('Error sending friend request:', error);
+    return {
+      success: false,
+      message: isOnlineBackendUnavailableError(error)
+        ? 'onlineBackendUnavailable'
+        : 'errorSendingRequest',
+    };
   }
 };
 

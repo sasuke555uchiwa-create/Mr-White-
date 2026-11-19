@@ -1,5 +1,4 @@
-import { FieldValue, DocumentReference, Transaction } from 'firebase-admin/firestore';
-import { db } from './firebaseAdmin';
+import { DbLike, DocRefLike, TxLike } from './errors';
 import {
   OnlineRole,
   ServerRoomPlayer,
@@ -20,10 +19,18 @@ export interface PrivateGameStateDoc {
   settledMatches?: string[];
 }
 
+export type PlayerProfileEntry = {
+  userExists: boolean;
+  userData: any;
+  pubExists: boolean;
+  pubData: any;
+};
+
 export async function readPlayerProfileDocs(
-  tx: Transaction,
+  db: DbLike,
+  tx: TxLike,
   uids: readonly string[]
-): Promise<Map<string, { userExists: boolean; userData: any; pubExists: boolean; pubData: any }>> {
+): Promise<Map<string, PlayerProfileEntry>> {
   const uniqueUids = Array.from(new Set(uids));
   const refs = uniqueUids.flatMap((uid) => [
     db.collection('users').doc(uid),
@@ -31,10 +38,7 @@ export async function readPlayerProfileDocs(
   ]);
 
   const snaps = refs.length > 0 ? await tx.getAll(...refs) : [];
-  const result = new Map<
-    string,
-    { userExists: boolean; userData: any; pubExists: boolean; pubData: any }
-  >();
+  const result = new Map<string, PlayerProfileEntry>();
 
   uniqueUids.forEach((uid, index) => {
     const userSnap = snaps[index * 2];
@@ -51,18 +55,23 @@ export async function readPlayerProfileDocs(
 }
 
 export function applyMatchSettlementWrites(params: {
-  tx: Transaction;
-  roomRef: DocumentReference;
+  db: DbLike;
+  serverTimestamp: () => any;
+  tx: TxLike;
+  roomRef: DocRefLike;
   roomData: any;
-  privateStateRef: DocumentReference;
+  privateStateRef: DocRefLike;
   privateState: PrivateGameStateDoc;
   players: ServerRoomPlayer[];
-  profileMap: Map<string, { userExists: boolean; userData: any; pubExists: boolean; pubData: any }>;
+  profileMap: Map<string, PlayerProfileEntry>;
   winner: 'citizens' | 'impostor';
   winReason: 'impostor_caught' | 'citizens_wrong_vote' | 'impostor_guessed';
   winningMrWhiteUid?: string | null;
+  extraRoomUpdates?: Record<string, any>;
 }) {
   const {
+    db,
+    serverTimestamp,
     tx,
     roomRef,
     roomData,
@@ -73,6 +82,7 @@ export function applyMatchSettlementWrites(params: {
     winner,
     winReason,
     winningMrWhiteUid = null,
+    extraRoomUpdates = {},
   } = params;
 
   const alreadySettled = Array.isArray(privateState.settledMatches)
@@ -119,11 +129,26 @@ export function applyMatchSettlementWrites(params: {
       const nextXp = currentXp + xpDelta;
       const nextLevel = calculateLevelFromXp(nextXp);
       const baseStats = baseUser.stats || {};
+      const roleKey = privateState.rolesByUid[p.uid] || 'citizen';
+      const prevRoleStats =
+        baseStats.roleStats && typeof baseStats.roleStats === 'object' ? baseStats.roleStats : {};
+      const prevRoleEntry = prevRoleStats[roleKey] || {};
+      const nextRoleStats = {
+        ...prevRoleStats,
+        [roleKey]: {
+          played: Number(prevRoleEntry.played || 0) + 1,
+          wins: Number(prevRoleEntry.wins || 0) + (isWinner ? 1 : 0),
+        },
+      };
+      const nextCurrentStreak = isWinner ? Number(baseStats.currentStreak || 0) + 1 : 0;
+      const nextLongestStreak = Math.max(Number(baseStats.longestStreak || 0), nextCurrentStreak);
       const nextStats = {
         wins: Number(baseStats.wins || 0) + (isWinner ? 1 : 0),
         hosted: Number(baseStats.hosted || 0),
         played: Number(baseStats.played || 0) + 1,
-        longestStreak: Number(baseStats.longestStreak || 0),
+        longestStreak: nextLongestStreak,
+        currentStreak: nextCurrentStreak,
+        roleStats: nextRoleStats,
       };
 
       const userRef = db.collection('users').doc(p.uid);
@@ -134,7 +159,7 @@ export function applyMatchSettlementWrites(params: {
           xp: nextXp,
           level: nextLevel,
           stats: nextStats,
-          updatedAt: FieldValue.serverTimestamp(),
+          updatedAt: serverTimestamp(),
         });
       }
 
@@ -149,7 +174,7 @@ export function applyMatchSettlementWrites(params: {
           xp: nextXp,
           level: nextLevel,
           stats: nextStats,
-          updatedAt: FieldValue.serverTimestamp(),
+          updatedAt: serverTimestamp(),
         });
       } else {
         tx.set(pubRef, {
@@ -159,15 +184,16 @@ export function applyMatchSettlementWrites(params: {
           xp: nextXp,
           level: nextLevel,
           stats: nextStats,
-          updatedAt: FieldValue.serverTimestamp(),
+          updatedAt: serverTimestamp(),
         });
       }
     }
 
     const nextSettled = [...(privateState.settledMatches || []), privateState.matchId].slice(-20);
     tx.update(privateStateRef, {
+      votesByUid: privateState.votesByUid || {},
       settledMatches: nextSettled,
-      updatedAt: FieldValue.serverTimestamp(),
+      updatedAt: serverTimestamp(),
     });
   }
 
@@ -190,8 +216,10 @@ export function applyMatchSettlementWrites(params: {
   };
 
   tx.update(roomRef, {
+    ...extraRoomUpdates,
     players: updatedPlayers,
+    playerIds: updatedPlayers.map((p) => p.uid),
     gameState: publicGameState,
-    updatedAt: FieldValue.serverTimestamp(),
+    updatedAt: serverTimestamp(),
   });
 }

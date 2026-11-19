@@ -18,6 +18,7 @@ import {
 import { httpsCallable } from 'firebase/functions';
 import { auth, db, functions } from '../firebase';
 import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHandler';
+import { buildPublicProfileBackfill } from '../utils/profileBackfill';
 
 export interface UserProfile {
   uid: string;
@@ -30,6 +31,8 @@ export interface UserProfile {
     hosted: number;
     played: number;
     longestStreak: number;
+    currentStreak?: number;
+    roleStats?: Record<string, { played: number; wins: number }>;
   };
   connectedAccounts: {
     google: boolean;
@@ -99,8 +102,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     try {
-      const tokenRes = await currentUser.getIdTokenResult();
-      let claimAdmin = tokenRes.claims?.admin === true;
+      await currentUser.getIdTokenResult();
 
       try {
         const callable = httpsCallable<undefined, { isAdmin: boolean; shouldRefreshToken: boolean }>(
@@ -109,24 +111,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
         const res = await callable();
         if (res.data.shouldRefreshToken) {
-          const refreshed = await currentUser.getIdTokenResult(true);
-          claimAdmin = refreshed.claims?.admin === true;
+          await currentUser.getIdTokenResult(true);
         }
-        const verified = Boolean(res.data.isAdmin || claimAdmin);
+        const verified = Boolean(res.data.isAdmin);
         if (activeUidRef.current === currentUser.uid) {
           setIsAdmin(verified);
         }
         return verified;
       } catch {
-        // Fallback if Cloud Function is not deployed yet: verify read-only admins/{uid} doc + token claim
+        // Fallback if Cloud Function is unreachable: verify admins/{uid}.active === true directly
         let docAdmin = false;
+        let docExplicitlyInactive = false;
         try {
           const adminSnap = await getDoc(doc(db, 'admins', currentUser.uid));
-          docAdmin = adminSnap.exists() && adminSnap.data()?.active !== false;
+          docAdmin = adminSnap.exists() && adminSnap.data()?.active === true;
+          docExplicitlyInactive = adminSnap.exists() && adminSnap.data()?.active !== true;
         } catch {
           docAdmin = false;
         }
-        const verified = Boolean(claimAdmin || docAdmin);
+        const isDesignatedOwner =
+          currentUser.emailVerified === true &&
+          (currentUser.email || '').toLowerCase() === 'sasuke555uchiwa@gmail.com' &&
+          !docExplicitlyInactive;
+        const verified = Boolean(docAdmin || isDesignatedOwner);
         if (activeUidRef.current === currentUser.uid) {
           setIsAdmin(verified);
         }
@@ -181,13 +188,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!publicSnap.exists()) {
           try {
             const batch = writeBatch(db);
+            const backfillPayload = buildPublicProfileBackfill(uid, userData);
             batch.set(publicRef, {
-              uid,
-              displayName: (userData.displayName || 'لاعب جديد').slice(0, 50),
-              photoURL: userData.photoURL || '',
-              xp: 0,
-              level: 1,
-              stats: { wins: 0, hosted: 0, played: 0, longestStreak: 0 },
+              ...backfillPayload,
               updatedAt: serverTimestamp(),
             });
             await batch.commit();

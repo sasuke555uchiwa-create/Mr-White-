@@ -30,7 +30,12 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { getUITranslation } from './translations';
 import { ToastHost } from './components/ToastHost';
 import { showToast } from './utils/toast';
-import { createOnlineRoom, joinOnlineRoom, leaveOnlineRoom } from './utils/onlineRoomService';
+import {
+  createOnlineRoom,
+  getOnlineActionErrorKey,
+  joinOnlineRoom,
+  leaveOnlineRoom,
+} from './utils/onlineRoomService';
 import { getRoleAsset, getRoleTitle } from './data/specialRoles';
 import { useOfflineMatch } from './hooks/useOfflineMatch';
 import { hasSpecialRole } from './src/game/voteEngine';
@@ -197,8 +202,8 @@ function AppContent() {
       setCurrentRoomId(roomId);
       navigate(GamePhase.ONLINE_LOBBY);
     } catch (err) {
-      console.error('Error creating room:', err);
-      showToast(t('errorOccurred'), 'error');
+      console.warn('Error creating room:', err);
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setOnlineBusy(false);
     }
@@ -226,8 +231,8 @@ function AppContent() {
         showToast(t(msgKey), 'warning');
       }
     } catch (err) {
-      console.error('Error joining room:', err);
-      showToast(t('errorOccurred'), 'error');
+      console.warn('Error joining room:', err);
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setOnlineBusy(false);
     }

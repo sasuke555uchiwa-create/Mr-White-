@@ -33,8 +33,12 @@ service cloud.firestore {
 
     function isAdmin() {
       return isSignedIn() && (
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
-        (request.auth.token.email_verified == true && request.auth.token.email == 'sasuke555uchiwa@gmail.com')
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true) ||
+        (request.auth.token.email_verified == true &&
+         request.auth.token.email == 'sasuke555uchiwa@gmail.com' &&
+         (!exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+          get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true))
       );
     }
 
@@ -65,14 +69,32 @@ service cloud.firestore {
              s.longestStreak == 0;
     }
 
+    function isValidRoleEntry(entry) {
+      return entry is map &&
+             entry.keys().hasAll(['played', 'wins']) &&
+             entry.keys().hasOnly(['played', 'wins']) &&
+             entry.played is number && entry.played >= 0 &&
+             entry.wins is number && entry.wins >= 0;
+    }
+
+    function isValidRoleStatsMap(rs) {
+      return rs is map &&
+             rs.keys().size() <= 12 &&
+             (!('citizen' in rs) || isValidRoleEntry(rs.citizen)) &&
+             (!('undercover' in rs) || isValidRoleEntry(rs.undercover)) &&
+             (!('mrwhite' in rs) || isValidRoleEntry(rs.mrwhite));
+    }
+
     function isValidStatsMap(s) {
       return s is map &&
              s.keys().hasAll(['wins', 'hosted', 'played', 'longestStreak']) &&
-             s.keys().hasOnly(['wins', 'hosted', 'played', 'longestStreak']) &&
+             s.keys().hasOnly(['wins', 'hosted', 'played', 'longestStreak', 'currentStreak', 'roleStats']) &&
              s.wins is number && s.wins >= 0 &&
              s.hosted is number && s.hosted >= 0 &&
              s.played is number && s.played >= 0 &&
-             s.longestStreak is number && s.longestStreak >= 0;
+             s.longestStreak is number && s.longestStreak >= 0 &&
+             (!('currentStreak' in s) || (s.currentStreak is number && s.currentStreak >= 0)) &&
+             (!('roleStats' in s) || isValidRoleStatsMap(s.roleStats));
     }
 
     function isValidConnectedAccounts(ca) {
@@ -123,6 +145,19 @@ service cloud.firestore {
              data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'updatedAt']);
     }
 
+    function isValidPublicProfileBackfill(data, userDoc) {
+      return isValidId(data.uid) &&
+             data.uid == request.auth.uid &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+             data.photoURL is string && data.photoURL.size() <= 2097152 &&
+             data.xp is number && data.xp >= 0 && data.xp == userDoc.xp &&
+             data.level is number && data.level >= 1 && data.level == userDoc.level &&
+             isValidStatsMap(data.stats) && data.stats == userDoc.stats &&
+             data.updatedAt == request.time &&
+             data.keys().hasAll(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'updatedAt']) &&
+             data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'xp', 'level', 'stats', 'updatedAt']);
+    }
+
     function isValidPublicProfileUpdate(data) {
       return isValidId(data.uid) &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
@@ -160,8 +195,17 @@ service cloud.firestore {
     // 2. Public Profiles (Leaderboard, Friends, Opponent Stats)
     match /publicProfiles/{userId} {
       allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn() && existing().uid is string;
-      allow create: if isVerified() && isValidId(userId) && request.auth.uid == userId && isValidPublicProfileCreate(incoming());
+      allow list: if isSignedIn() && existing().xp >= 0;
+      allow create: if isVerified() && isValidId(userId) && request.auth.uid == userId && (
+        isValidPublicProfileCreate(incoming()) ||
+        (
+          exists(/databases/$(database)/documents/users/$(userId)) &&
+          isValidPublicProfileBackfill(
+            incoming(),
+            get(/databases/$(database)/documents/users/$(userId)).data
+          )
+        )
+      );
       allow update: if isVerified() && isValidId(userId) && isValidPublicProfileUpdate(incoming()) && (
         isAdmin() ||
         (

@@ -4,6 +4,7 @@ import { useOnlineRoom } from '../hooks/useOnlineRoom';
 import { useTurnTimer } from '../hooks/useTurnTimer';
 import {
   advanceOnlineTurn,
+  getOnlineActionErrorKey,
   leaveOnlineRoom,
   markOnlineRevealReady,
   nextOnlineMatch,
@@ -42,8 +43,9 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import { getUITranslation } from '../translations';
-import { getSettings } from '../services/storageService';
+import { getSettings, recordOnlineSessionMatch } from '../services/storageService';
 import { showToast } from '../utils/toast';
+import { getPlayerRoundPoints } from '../src/game/winEngine';
 
 interface OnlineClue {
   id: string;
@@ -123,6 +125,45 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       onReturnToLobby();
     }
   }, [room, onReturnToLobby]);
+
+  useEffect(() => {
+    if (!user?.uid || !room?.gameState) return;
+    const gs = room.gameState;
+    if (gs.phase !== 'RESULT' || !gs.matchId || !gs.revealedResult?.rolesByUid) return;
+
+    const myRole = gs.revealedResult.rolesByUid[user.uid];
+    if (!myRole) return;
+
+    const mappedPlayers: Player[] = (room.players || []).map((p: any, idx: number) => ({
+      id: idx,
+      uid: p.uid,
+      name: p.name,
+      avatar: p.avatar || '',
+      role: (gs.revealedResult.rolesByUid[p.uid] || 'citizen') as PlayerRole,
+      isImpostor: gs.revealedResult.rolesByUid[p.uid] === 'mrwhite',
+      score: p.score || 0,
+      isEliminated: Boolean(p.isEliminated),
+    }));
+
+    const me = mappedPlayers.find((p) => p.uid === user.uid);
+    if (!me) return;
+
+    const winningMrWhiteUid = gs.winningMrWhiteUid || gs.revealedResult.impostorId;
+    const winningMrWhiteId =
+      gs.winReason === 'impostor_guessed'
+        ? mappedPlayers.find((p) => p.uid === winningMrWhiteUid)?.id ?? null
+        : null;
+
+    const didWin =
+      getPlayerRoundPoints(me, mappedPlayers, gs.winner, gs.winReason, winningMrWhiteId) > 0;
+
+    recordOnlineSessionMatch({
+      uid: user.uid,
+      matchKey: `${roomId}:${gs.matchId}`,
+      role: myRole,
+      won: didWin,
+    });
+  }, [room, roomId, user?.uid]);
 
   const isHost = room?.hostId === user?.uid;
   const gameState = room?.gameState || {};
@@ -284,7 +325,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       await markOnlineRevealReady(roomId);
     } catch (err) {
       console.error('Mark reveal ready failed:', err);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -304,7 +345,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       await submitOnlineClue(roomId, trimmed.slice(0, 80));
     } catch (err) {
       console.error('Submit clue failed:', err);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setSubmittingClue(false);
     }
@@ -318,7 +359,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       await advanceOnlineTurn(roomId, 'skip', currentTurnIndex);
     } catch (err) {
       console.error('Skip turn failed:', err);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -332,7 +373,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       await startOnlineVoting(roomId);
     } catch (err) {
       console.error('Start voting failed:', err);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -346,7 +387,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       await submitOnlineVote(roomId, suspectUid);
     } catch (err) {
       console.error('Vote submission failed:', err);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setSubmittingVote(false);
     }
@@ -359,7 +400,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       await resolveOnlineVotes(roomId);
     } catch (err) {
       console.error('Force resolve votes failed:', err);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -372,7 +413,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       await proceedAfterOnlineVoteReveal(roomId);
     } catch (err) {
       console.error('Proceed after vote reveal failed:', err);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -385,7 +426,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       await returnOnlineToLobby(roomId);
     } catch (err) {
       console.error('Return to lobby failed:', err);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -398,7 +439,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       await nextOnlineMatch(roomId);
     } catch (err) {
       console.error('Next match failed:', err);
-      showToast(t('errorOccurred'), 'error');
+      showToast(t(getOnlineActionErrorKey(err)), 'error');
     } finally {
       setBusyAction(false);
     }
@@ -521,6 +562,9 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
                   {scaledCitizens} {t('citizen')} · {scaledUndercover} {t('undercover')} · 1 {t('mrWhite')}
                 </span>
               </div>
+              <p className="text-[11px] font-bold text-text-muted/85 pt-2 border-t border-white/10 text-start leading-relaxed">
+                {t('onlineClassicRolesNote')}
+              </p>
             </div>
 
             <button

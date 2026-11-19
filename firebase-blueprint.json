@@ -10,7 +10,17 @@
         "photoURL": { "type": "string", "maxLength": 2097152 },
         "xp": { "type": "number" },
         "level": { "type": "number" },
-        "stats": { "type": "object" },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "wins": { "type": "number" },
+            "hosted": { "type": "number" },
+            "played": { "type": "number" },
+            "longestStreak": { "type": "number" },
+            "currentStreak": { "type": "number" },
+            "roleStats": { "type": "object" }
+          }
+        },
         "connectedAccounts": { "type": "object" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -27,7 +37,17 @@
         "photoURL": { "type": "string", "maxLength": 2097152 },
         "xp": { "type": "number" },
         "level": { "type": "number" },
-        "stats": { "type": "object" },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "wins": { "type": "number" },
+            "hosted": { "type": "number" },
+            "played": { "type": "number" },
+            "longestStreak": { "type": "number" },
+            "currentStreak": { "type": "number" },
+            "roleStats": { "type": "object" }
+          }
+        },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "displayName", "photoURL", "xp", "level", "stats", "updatedAt"]

@@ -2,34 +2,29 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.checkAdminStatus = void 0;
 const https_1 = require("firebase-functions/v2/https");
+const adminPolicy_1 = require("./adminPolicy");
+const errors_1 = require("./errors");
 const firebaseAdmin_1 = require("./firebaseAdmin");
 /**
- * Verifies admin privilege strictly from server state (Firebase Custom Claims OR admins/{uid} doc)
- * and synchronizes the Auth custom claim if granted in admins/{uid}.
+ * Verifies admin privilege strictly from server state (admins/{uid}.active === true)
+ * and grants or revokes Firebase Auth custom claims accordingly.
  */
 exports.checkAdminStatus = (0, https_1.onCall)(async (request) => {
-    if (!request.auth?.uid) {
-        throw new https_1.HttpsError('unauthenticated', 'Authentication required.');
+    try {
+        const result = await (0, adminPolicy_1.executeCheckAdminStatus)({ db: firebaseAdmin_1.db, adminAuth: firebaseAdmin_1.adminAuth }, {
+            uid: request.auth?.uid,
+            token: request.auth?.token,
+        });
+        return {
+            isAdmin: result.isAdmin,
+            shouldRefreshToken: result.shouldRefreshToken,
+        };
     }
-    const uid = request.auth.uid;
-    const hasClaim = request.auth.token?.admin === true;
-    const adminDoc = await firebaseAdmin_1.db.collection('admins').doc(uid).get();
-    const hasAdminRecord = adminDoc.exists && adminDoc.data()?.active !== false;
-    const isAdmin = hasClaim || hasAdminRecord;
-    if (hasAdminRecord && !hasClaim) {
-        const userRecord = await firebaseAdmin_1.adminAuth.getUser(uid);
-        const existingClaims = userRecord.customClaims || {};
-        await firebaseAdmin_1.adminAuth.setCustomUserClaims(uid, { ...existingClaims, admin: true });
+    catch (err) {
+        if (err instanceof errors_1.FunctionActionError) {
+            throw new https_1.HttpsError(err.code, err.message);
+        }
+        throw err;
     }
-    else if (!isAdmin && hasClaim) {
-        const userRecord = await firebaseAdmin_1.adminAuth.getUser(uid);
-        const existingClaims = { ...(userRecord.customClaims || {}) };
-        delete existingClaims.admin;
-        await firebaseAdmin_1.adminAuth.setCustomUserClaims(uid, existingClaims);
-    }
-    return {
-        isAdmin,
-        shouldRefreshToken: hasAdminRecord !== hasClaim,
-    };
 });
 //# sourceMappingURL=adminFunctions.js.map

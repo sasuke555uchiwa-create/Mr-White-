@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import {
   DescriptionEntry,
   GamePhase,
@@ -9,7 +9,12 @@ import {
 } from '../types';
 import { VoteCompletionMeta } from '../components/VotingScreen';
 import { getRandomWordPair } from '../services/geminiService';
-import { getScores, updatePlayerScore } from '../services/storageService';
+import {
+  getScores,
+  recordOfflineSessionMatch,
+  updatePlayerScore,
+} from '../services/storageService';
+import { auth } from '../firebase';
 import { playSound } from '../services/soundService';
 import { buildMainRolePool, buildSpecialRolePool } from '../src/game/roleEngine';
 import {
@@ -56,6 +61,7 @@ export function useOfflineMatch({ navigate, t }: UseOfflineMatchOptions) {
     'impostor_guessed' | 'citizens_wrong_vote' | 'impostor_caught' | 'fool_won' | null
   >(null);
   const [currentRound, setCurrentRound] = useState<number>(1);
+  const matchKeyRef = useRef<string>('');
 
   const [gameSettings, setGameSettings] = useState<GameSettings>({
     mrWhiteCount: 1,
@@ -163,6 +169,7 @@ export function useOfflineMatch({ navigate, t }: UseOfflineMatchOptions) {
       setPendingVoteMeta(null);
       setDescriptionsLog([]);
       setCurrentRound(1);
+      matchKeyRef.current = `offline_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       navigate(GamePhase.REVEAL);
     },
     [navigate]
@@ -199,6 +206,8 @@ export function useOfflineMatch({ navigate, t }: UseOfflineMatchOptions) {
       setLastWinner(resolvedWinner);
       const sourcePlayers = playersOverride || players;
 
+      const outcomes: { name: string; role: string; specialRole?: string | null; won: boolean }[] =
+        [];
       const updatedPlayers = sourcePlayers.map((p) => {
         const pointsToAdd = getPlayerRoundPoints(
           p,
@@ -207,6 +216,12 @@ export function useOfflineMatch({ navigate, t }: UseOfflineMatchOptions) {
           effectiveReason,
           winningMrWhiteId
         );
+        outcomes.push({
+          name: p.name,
+          role: p.role,
+          specialRole: p.specialRole ?? null,
+          won: pointsToAdd > 0,
+        });
 
         if (pointsToAdd > 0) {
           updatePlayerScore(p.name, pointsToAdd);
@@ -215,6 +230,17 @@ export function useOfflineMatch({ navigate, t }: UseOfflineMatchOptions) {
         return p;
       });
       setPlayers(updatedPlayers);
+
+      if (outcomes.length > 0) {
+        const key =
+          matchKeyRef.current || `offline_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        matchKeyRef.current = key;
+        recordOfflineSessionMatch({
+          matchKey: key,
+          uid: auth.currentUser?.uid || null,
+          outcomes,
+        });
+      }
     },
     [players, winReason]
   );

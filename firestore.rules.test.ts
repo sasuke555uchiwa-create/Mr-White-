@@ -21,6 +21,8 @@ import {
   collection,
   query,
   where,
+  orderBy,
+  limit,
   serverTimestamp,
 } from 'firebase/firestore';
 import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -236,6 +238,91 @@ describe('Firestore Security Rules', () => {
           collection(bobDb(), 'rooms'),
           where('isPrivate', '==', false),
           where('status', '==', 'waiting')
+        )
+      )
+    );
+  });
+
+  // --- Admin Lifecycle & Public Profile Backfill Tests ---
+  it('ALLOWS active admin doc ({ active: true }) to read user docs and DENIES inactive or deleted admin docs', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'admins', 'bob'), { active: true });
+    });
+    await assertSucceeds(getDoc(doc(bobDb(), 'users', 'alice')));
+
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'admins', 'bob'), { active: false });
+    });
+    await assertFails(getDoc(doc(bobDb(), 'users', 'alice')));
+
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const snap = doc(ctx.firestore(), 'admins', 'bob');
+      await (await import('firebase/firestore')).deleteDoc(snap);
+    });
+    await assertFails(getDoc(doc(bobDb(), 'users', 'alice')));
+  });
+
+  it('ALLOWS missing publicProfiles/{uid} backfill matching users/{uid} but DENIES forged XP/stats', async () => {
+    await assertSucceeds(
+      setDoc(doc(bobDb(), 'publicProfiles', 'bob'), {
+        uid: 'bob',
+        displayName: 'Bob',
+        photoURL: '',
+        xp: 50,
+        level: 1,
+        stats: { wins: 0, hosted: 0, played: 1, longestStreak: 0 },
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    const bobForgeDb = testEnv
+      .authenticatedContext('bob2', { email: 'bob2@example.com', email_verified: true })
+      .firestore();
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'users', 'bob2'), {
+        uid: 'bob2',
+        displayName: 'Bob2',
+        photoURL: '',
+        xp: 50,
+        level: 1,
+        stats: { wins: 0, hosted: 0, played: 1, longestStreak: 0 },
+        connectedAccounts: { google: true, apple: false },
+      });
+    });
+    await assertFails(
+      setDoc(doc(bobForgeDb, 'publicProfiles', 'bob2'), {
+        uid: 'bob2',
+        displayName: 'Bob2',
+        photoURL: '',
+        xp: 99999,
+        level: 50,
+        stats: { wins: 500, hosted: 0, played: 1, longestStreak: 0 },
+        updatedAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('ALLOWS signed-in leaderboard query on publicProfiles with xp >= 0 and DENIES unfiltered or unauthenticated queries', async () => {
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(bobDb(), 'publicProfiles'),
+          where('xp', '>=', 0),
+          orderBy('xp', 'desc'),
+          limit(10)
+        )
+      )
+    );
+
+    await assertFails(getDocs(collection(bobDb(), 'publicProfiles')));
+    const unauthDb = testEnv.unauthenticatedContext().firestore();
+    await assertFails(
+      getDocs(
+        query(
+          collection(unauthDb, 'publicProfiles'),
+          where('xp', '>=', 0),
+          orderBy('xp', 'desc'),
+          limit(10)
         )
       )
     );

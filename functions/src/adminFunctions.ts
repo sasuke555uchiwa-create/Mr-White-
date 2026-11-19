@@ -1,36 +1,29 @@
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+import { executeCheckAdminStatus } from './adminPolicy';
+import { DbLike, FunctionActionError } from './errors';
 import { adminAuth, db } from './firebaseAdmin';
 
 /**
- * Verifies admin privilege strictly from server state (Firebase Custom Claims OR admins/{uid} doc)
- * and synchronizes the Auth custom claim if granted in admins/{uid}.
+ * Verifies admin privilege strictly from server state (admins/{uid}.active === true)
+ * and grants or revokes Firebase Auth custom claims accordingly.
  */
 export const checkAdminStatus = onCall(async (request) => {
-  if (!request.auth?.uid) {
-    throw new HttpsError('unauthenticated', 'Authentication required.');
+  try {
+    const result = await executeCheckAdminStatus(
+      { db: db as unknown as DbLike, adminAuth },
+      {
+        uid: request.auth?.uid,
+        token: request.auth?.token as Record<string, any> | undefined,
+      }
+    );
+    return {
+      isAdmin: result.isAdmin,
+      shouldRefreshToken: result.shouldRefreshToken,
+    };
+  } catch (err) {
+    if (err instanceof FunctionActionError) {
+      throw new HttpsError(err.code, err.message);
+    }
+    throw err;
   }
-
-  const uid = request.auth.uid;
-  const hasClaim = request.auth.token?.admin === true;
-
-  const adminDoc = await db.collection('admins').doc(uid).get();
-  const hasAdminRecord = adminDoc.exists && adminDoc.data()?.active !== false;
-
-  const isAdmin = hasClaim || hasAdminRecord;
-
-  if (hasAdminRecord && !hasClaim) {
-    const userRecord = await adminAuth.getUser(uid);
-    const existingClaims = userRecord.customClaims || {};
-    await adminAuth.setCustomUserClaims(uid, { ...existingClaims, admin: true });
-  } else if (!isAdmin && hasClaim) {
-    const userRecord = await adminAuth.getUser(uid);
-    const existingClaims = { ...(userRecord.customClaims || {}) };
-    delete existingClaims.admin;
-    await adminAuth.setCustomUserClaims(uid, existingClaims);
-  }
-
-  return {
-    isAdmin,
-    shouldRefreshToken: hasAdminRecord !== hasClaim,
-  };
 });

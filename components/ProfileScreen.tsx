@@ -10,6 +10,7 @@ import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHand
 
 import { FriendsSection } from './FriendsSection';
 import { LeaderboardSection } from './LeaderboardSection';
+import { GameStatistics } from './GameStatistics';
 import { Avatar } from './Avatar';
 import { getUITranslation } from '../translations';
 import { getSettings } from '../services/storageService';
@@ -357,28 +358,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onBack }) => {
         </div>
       </div>
 
-      {/* Stats */}
-      <h3 className={`text-lg font-black mb-4 drop-shadow-sm ${isRTL ? 'text-right' : 'text-left'}`}>{getUITranslation(lang, 'onlineStats')}</h3>
-      <div className="grid grid-cols-2 gap-3 mb-8">
-        <div className="card-modern p-4 text-center text-white bg-gradient-to-br from-blue-500/20 to-blue-600/10">
-          <div className="text-3xl font-black mb-1 drop-shadow-md text-blue-400">
-            {profile.stats.played > 0 ? Math.round((profile.stats.wins / profile.stats.played) * 100) : 0}%
-          </div>
-          <div className="text-sm font-bold text-text-muted">{getUITranslation(lang, 'winRate')}</div>
-        </div>
-        <div className="card-modern p-4 text-center text-white bg-gradient-to-br from-teal-500/20 to-teal-600/10">
-          <div className="text-3xl font-black mb-1 drop-shadow-md text-teal-400">{profile.stats.hosted}</div>
-          <div className="text-sm font-bold text-text-muted">{getUITranslation(lang, 'hostedGames')}</div>
-        </div>
-        <div className="card-modern p-4 text-center text-white bg-gradient-to-br from-green-500/20 to-green-600/10">
-          <div className="text-3xl font-black mb-1 drop-shadow-md text-green-400">{profile.stats.played}</div>
-          <div className="text-sm font-bold text-text-muted">{getUITranslation(lang, 'gamesPlayed')}</div>
-        </div>
-        <div className="card-modern p-4 text-center text-white bg-gradient-to-br from-purple-500/20 to-purple-600/10">
-          <div className="text-3xl font-black mb-1 drop-shadow-md text-purple-400">{profile.stats.longestStreak}</div>
-          <div className="text-sm font-bold text-text-muted">{getUITranslation(lang, 'longestWinStreak')}</div>
-        </div>
-      </div>
+      {/* Game Statistics (Win/Loss Ratios & Favorite Roles Across Sessions) */}
+      <GameStatistics profile={profile} userId={user.uid} lang={lang} />
 
       {/* Friends Section */}
       <FriendsSection />

@@ -19,10 +19,84 @@ export interface RoomSettingsPayload {
   turnDurationSeconds: number;
 }
 
+export type OnlineServiceErrorCode =
+  | 'backendUnavailable'
+  | 'permissionDenied'
+  | 'unauthenticated'
+  | 'failedPrecondition'
+  | 'notFound'
+  | 'unknown';
+
+export class OnlineServiceError extends Error {
+  public readonly code: OnlineServiceErrorCode;
+  public readonly originalCode?: string;
+
+  constructor(code: OnlineServiceErrorCode, message: string, originalCode?: string) {
+    super(message);
+    this.name = 'OnlineServiceError';
+    this.code = code;
+    this.originalCode = originalCode;
+  }
+}
+
+export function isOnlineBackendUnavailableError(err: unknown): boolean {
+  if (err instanceof OnlineServiceError) {
+    return err.code === 'backendUnavailable';
+  }
+  const code = String((err as any)?.code || '').toLowerCase();
+  const msg = String((err as any)?.message || '').toLowerCase();
+  return (
+    code === 'functions/internal' ||
+    code === 'functions/unavailable' ||
+    msg === 'internal' ||
+    msg.includes('err_failed') ||
+    msg.includes('failed to fetch')
+  );
+}
+
+export function getOnlineActionErrorKey(err: unknown): string {
+  if (isOnlineBackendUnavailableError(err)) {
+    return 'onlineBackendUnavailable';
+  }
+  if (err instanceof OnlineServiceError && err.code === 'permissionDenied') {
+    return 'noPermission';
+  }
+  return 'errorOccurred';
+}
+
 async function callFn<TReq, TRes>(name: string, payload: TReq): Promise<TRes> {
-  const callable = httpsCallable<TReq, TRes>(functions, name);
-  const res = await callable(payload);
-  return res.data;
+  try {
+    const callable = httpsCallable<TReq, TRes>(functions, name);
+    const res = await callable(payload);
+    return res.data;
+  } catch (err: any) {
+    const rawCode = String(err?.code || '');
+    const msg = String(err?.message || 'Online service call failed.');
+    if (
+      rawCode === 'functions/internal' ||
+      rawCode === 'functions/unavailable' ||
+      msg.toLowerCase() === 'internal'
+    ) {
+      throw new OnlineServiceError(
+        'backendUnavailable',
+        `Cloud Function "${name}" is unavailable or not deployed (${rawCode || msg}).`,
+        rawCode
+      );
+    }
+    if (rawCode === 'functions/permission-denied') {
+      throw new OnlineServiceError('permissionDenied', msg, rawCode);
+    }
+    if (rawCode === 'functions/unauthenticated') {
+      throw new OnlineServiceError('unauthenticated', msg, rawCode);
+    }
+    if (rawCode === 'functions/failed-precondition') {
+      throw new OnlineServiceError('failedPrecondition', msg, rawCode);
+    }
+    if (rawCode === 'functions/not-found') {
+      throw new OnlineServiceError('notFound', msg, rawCode);
+    }
+    throw new OnlineServiceError('unknown', msg, rawCode);
+  }
 }
 
 export const createOnlineRoom = async (
@@ -156,10 +230,10 @@ export const submitOnlineMrWhiteGuess = async (
   roomId: string,
   guess: string,
   forceEliminateMissing = false
-): Promise<{ isCorrect: boolean; secretWord: string }> => {
+): Promise<{ isCorrect: boolean }> => {
   return callFn<
     { roomId: string; guess: string; forceEliminateMissing?: boolean },
-    { isCorrect: boolean; secretWord: string }
+    { isCorrect: boolean }
   >('submitMrWhiteGuess', { roomId, guess, forceEliminateMissing });
 };
 

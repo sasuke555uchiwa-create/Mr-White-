@@ -3,7 +3,11 @@ import { collection, query, where, onSnapshot, limit } from 'firebase/firestore'
 import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { handleFirestoreError, OperationType } from '../utils/firestoreErrorHandler';
-import { joinOnlineRoom, quickJoinOnlineRoom } from '../utils/onlineRoomService';
+import {
+  isOnlineBackendUnavailableError,
+  joinOnlineRoom,
+  quickJoinOnlineRoom,
+} from '../utils/onlineRoomService';
 import { motion } from 'framer-motion';
 import { ArrowRight, Search, Plus, Globe, Lock, EyeOff, Eye, Zap, Clock, Minus } from 'lucide-react';
 import { Avatar } from './Avatar';
@@ -151,8 +155,9 @@ export const OnlineRoomsScreen: React.FC<OnlineRoomsScreenProps> = ({
         showToast(t('noOpenRoomsForQuickJoin'), 'info');
       }
     } catch (error) {
-      console.error('Quick join error:', error);
-      showToast(t('searchError'), 'error');
+      console.warn('Quick join error:', error);
+      const msgKey = isOnlineBackendUnavailableError(error) ? 'onlineBackendUnavailable' : 'searchError';
+      showToast(t(msgKey), 'error');
     } finally {
       setJoining(false);
     }
@@ -177,8 +182,9 @@ export const OnlineRoomsScreen: React.FC<OnlineRoomsScreenProps> = ({
         showToast(msg, 'warning');
       }
     } catch (error) {
-      console.error('Error joining room by code:', error);
-      const msg = t('searchError');
+      console.warn('Error joining room by code:', error);
+      const msgKey = isOnlineBackendUnavailableError(error) ? 'onlineBackendUnavailable' : 'searchError';
+      const msg = t(msgKey);
       setJoinError(msg);
       showToast(msg, 'error');
     } finally {
@@ -552,6 +558,9 @@ export const OnlineRoomsScreen: React.FC<OnlineRoomsScreenProps> = ({
                   </button>
                 </div>
               </div>
+              <p className="text-xs font-bold text-text-muted bg-bg-dark/70 border border-white/10 rounded-xl px-3.5 py-2.5 leading-relaxed">
+                {t('onlineClassicRolesNote')}
+              </p>
             </div>
 
             <div className="flex gap-3">
