@@ -13,13 +13,16 @@ export const sendFriendRequest = async (
     );
     const res = await callable({ toId });
     return res.data;
-  } catch (error) {
+  } catch (error: any) {
     console.warn('Error sending friend request:', error);
+    const message = isOnlineBackendUnavailableError(error)
+      ? 'onlineBackendUnavailable'
+      : String(error?.code || '') === 'functions/resource-exhausted'
+      ? 'rateLimitExceeded'
+      : 'errorSendingRequest';
     return {
       success: false,
-      message: isOnlineBackendUnavailableError(error)
-        ? 'onlineBackendUnavailable'
-        : 'errorSendingRequest',
+      message,
     };
   }
 };

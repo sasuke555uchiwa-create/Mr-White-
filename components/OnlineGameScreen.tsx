@@ -80,6 +80,7 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
   const [submittingClue, setSubmittingClue] = useState(false);
   const [submittingVote, setSubmittingVote] = useState(false);
   const [busyAction, setBusyAction] = useState(false);
+  const [votingNowMs, setVotingNowMs] = useState(() => Date.now());
 
   const isLeavingRef = useRef(false);
   const lastAutoAdvancedTurnRef = useRef<string | null>(null);
@@ -154,8 +155,11 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
         ? mappedPlayers.find((p) => p.uid === winningMrWhiteUid)?.id ?? null
         : null;
 
+    const serverWinnerFlag = gs.revealedResult?.winnersByUid?.[user.uid];
     const didWin =
-      getPlayerRoundPoints(me, mappedPlayers, gs.winner, gs.winReason, winningMrWhiteId) > 0;
+      typeof serverWinnerFlag === 'boolean'
+        ? serverWinnerFlag
+        : getPlayerRoundPoints(me, mappedPlayers, gs.winner, gs.winReason, winningMrWhiteId) > 0;
 
     recordOnlineSessionMatch({
       uid: user.uid,
@@ -235,6 +239,13 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
       cluesEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }, [clues.length, phase]);
+
+  useEffect(() => {
+    if (phase !== 'VOTING') return;
+    setVotingNowMs(Date.now());
+    const id = window.setInterval(() => setVotingNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [phase]);
 
   // Auto-advance via server if timer hits 0 OR active speaker left/was eliminated
   useEffect(() => {
@@ -816,10 +827,8 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
             {isHost ? (
               <button
                 onClick={handleTimeUp}
-                disabled={busyAction}
-                className={`btn-modern w-full min-h-[52px] py-3.5 rounded-[2rem] font-black text-base flex items-center justify-center gap-2 disabled:opacity-50 ${
-                  turnsCompleted ? '' : 'btn-modern-danger'
-                }`}
+                disabled={busyAction || !turnsCompleted}
+                className="btn-modern w-full min-h-[52px] py-3.5 rounded-[2rem] font-black text-base flex items-center justify-center gap-2 disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <Vote size={20} />
                 <span>{t('endAndVote')}</span>
@@ -903,15 +912,33 @@ export const OnlineGameScreen: React.FC<OnlineGameScreenProps> = ({
             </div>
           )}
 
-          {isHost && validVoteCount > 0 && validVoteCount < alivePlayers.length && (
-            <button
-              onClick={handleForceResolveVotes}
-              disabled={busyAction}
-              className="mt-auto px-5 py-3 rounded-2xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 font-black text-xs transition-colors disabled:opacity-40"
-            >
-              {t('forceEndVote')}
-            </button>
-          )}
+          {isHost && validVoteCount > 0 && validVoteCount < alivePlayers.length && (() => {
+            const requiredMajority =
+              alivePlayers.length <= 1
+                ? Math.max(0, alivePlayers.length)
+                : Math.min(alivePlayers.length, Math.max(2, Math.floor(alivePlayers.length / 2) + 1));
+            const votingStartedAt = Number(gameState.votingStartedAt || 0);
+            const elapsedMs = votingStartedAt > 0 ? Math.max(0, votingNowMs - votingStartedAt) : 0;
+            const remainingSeconds = Math.max(0, Math.ceil((15000 - elapsedMs) / 1000));
+            const canForceResolve = validVoteCount >= requiredMajority && remainingSeconds === 0;
+
+            return (
+              <div className="mt-auto flex flex-col items-center gap-1.5">
+                <button
+                  onClick={handleForceResolveVotes}
+                  disabled={busyAction || !canForceResolve}
+                  className="px-5 py-3 rounded-2xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 font-black text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {t('forceEndVote')}
+                </button>
+                {!canForceResolve && (
+                  <p className="text-[11px] font-bold text-text-muted tabular-nums">
+                    {validVoteCount}/{requiredMajority} {t('votedStatus')} · {remainingSeconds}s
+                  </p>
+                )}
+              </div>
+            );
+          })()}
         </div>
       );
     }

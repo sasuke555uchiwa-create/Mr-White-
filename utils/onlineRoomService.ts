@@ -25,6 +25,7 @@ export type OnlineServiceErrorCode =
   | 'unauthenticated'
   | 'failedPrecondition'
   | 'notFound'
+  | 'rateLimited'
   | 'unknown';
 
 export class OnlineServiceError extends Error {
@@ -58,8 +59,12 @@ export function getOnlineActionErrorKey(err: unknown): string {
   if (isOnlineBackendUnavailableError(err)) {
     return 'onlineBackendUnavailable';
   }
-  if (err instanceof OnlineServiceError && err.code === 'permissionDenied') {
-    return 'noPermission';
+  if (err instanceof OnlineServiceError) {
+    if (err.code === 'permissionDenied') return 'noPermission';
+    if (err.code === 'rateLimited') return 'rateLimitExceeded';
+  }
+  if (String((err as any)?.code || '') === 'functions/resource-exhausted') {
+    return 'rateLimitExceeded';
   }
   return 'errorOccurred';
 }
@@ -94,6 +99,9 @@ async function callFn<TReq, TRes>(name: string, payload: TReq): Promise<TRes> {
     }
     if (rawCode === 'functions/not-found') {
       throw new OnlineServiceError('notFound', msg, rawCode);
+    }
+    if (rawCode === 'functions/resource-exhausted') {
+      throw new OnlineServiceError('rateLimited', msg, rawCode);
     }
     throw new OnlineServiceError('unknown', msg, rawCode);
   }

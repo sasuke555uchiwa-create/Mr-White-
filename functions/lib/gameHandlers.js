@@ -1,5 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.FORCE_RESOLVE_MIN_ELAPSED_MS = void 0;
+exports.getRequiredMajorityVotes = getRequiredMajorityVotes;
 exports.executeBeginMatch = executeBeginMatch;
 exports.executeStartRound = executeStartRound;
 exports.executeMarkRevealReady = executeMarkRevealReady;
@@ -16,9 +18,37 @@ const crypto_1 = require("crypto");
 const errors_1 = require("./errors");
 const gameLogic_1 = require("./gameLogic");
 const matchSettlement_1 = require("./matchSettlement");
+const rateLimit_1 = require("./rateLimit");
 const wordData_1 = require("./wordData");
+exports.FORCE_RESOLVE_MIN_ELAPSED_MS = 15_000;
+function getRequiredMajorityVotes(aliveCount) {
+    if (aliveCount <= 1)
+        return Math.max(0, aliveCount);
+    return Math.min(aliveCount, Math.max(2, Math.floor(aliveCount / 2) + 1));
+}
 function getCurrentTime(deps) {
     return deps.now ? deps.now() : Date.now();
+}
+function assertSafeId(value, label) {
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{2,128}$/.test(value.trim())) {
+        throw new errors_1.FunctionActionError('invalid-argument', `Invalid ${label}.`);
+    }
+    return value.trim();
+}
+function sanitizePlainText(value, maxLen) {
+    if (typeof value !== 'string')
+        return '';
+    return value.replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, maxLen);
+}
+function assertMatchStateSync(gameState, privateState) {
+    if (gameState.matchId && privateState.matchId && gameState.matchId !== privateState.matchId) {
+        throw new errors_1.FunctionActionError('failed-precondition', 'Stale match state detected.');
+    }
+    const pubRound = Number(gameState.round || 1);
+    const privRound = Number(privateState.round || 1);
+    if (pubRound !== privRound) {
+        throw new errors_1.FunctionActionError('failed-precondition', 'Stale round state detected.');
+    }
 }
 function buildNextTurnPatch(gameState, players, turnDurationSeconds, currentTimeMs, extraClue) {
     const aliveSet = new Set(players.filter((p) => !p.isEliminated).map((p) => p.uid));
@@ -49,22 +79,21 @@ function buildNextTurnPatch(gameState, players, turnDurationSeconds, currentTime
 async function executeBeginMatch(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.beginMatch);
     const roomRef = deps.db.collection('rooms').doc(roomId);
     await deps.db.runTransaction(async (tx) => {
         const snap = await tx.get(roomRef);
         if (!snap.exists)
             throw new errors_1.FunctionActionError('not-found', 'Room not found.');
         const data = snap.data();
-        if (data.hostId !== uid) {
+        const players = Array.isArray(data.players) ? data.players : [];
+        if (data.hostId !== uid || !players.some((p) => p.uid === uid)) {
             throw new errors_1.FunctionActionError('permission-denied', 'Only host can start the match.');
         }
         if (data.status !== 'waiting' || data.gameState) {
             throw new errors_1.FunctionActionError('failed-precondition', 'Match can only begin from a waiting room.');
         }
-        const players = Array.isArray(data.players) ? data.players : [];
         if (players.length < 3) {
             throw new errors_1.FunctionActionError('failed-precondition', 'At least 3 players required.');
         }
@@ -85,9 +114,8 @@ async function executeBeginMatch(deps, uid, dataIn) {
 async function executeStartRound(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.startRound);
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const privateStateRef = roomRef.collection('privateState').doc('current');
     await deps.db.runTransaction(async (tx) => {
@@ -98,14 +126,14 @@ async function executeStartRound(deps, uid, dataIn) {
         if (!roomSnap.exists)
             throw new errors_1.FunctionActionError('not-found', 'Room not found.');
         const data = roomSnap.data();
-        if (data.hostId !== uid) {
+        const players = Array.isArray(data.players) ? data.players : [];
+        if (data.hostId !== uid || !players.some((p) => p.uid === uid)) {
             throw new errors_1.FunctionActionError('permission-denied', 'Only host can start a round.');
         }
         const phase = data.gameState?.phase;
         if (data.status !== 'playing' || (phase !== 'SETUP_PENDING' && phase !== 'CATEGORY_SELECT')) {
             throw new errors_1.FunctionActionError('failed-precondition', 'Round can only be started during SETUP_PENDING.');
         }
-        const players = Array.isArray(data.players) ? data.players : [];
         if (players.length < 3) {
             throw new errors_1.FunctionActionError('failed-precondition', 'Need at least 3 players.');
         }
@@ -189,6 +217,7 @@ async function executeStartRound(deps, uid, dataIn) {
                 turnsCompleted: false,
                 clues: [],
                 votedUids: [],
+                votingStartedAt: null,
                 mostVotedId: null,
                 mostVotedRevealedRole: null,
                 votersForEliminated: [],
@@ -207,9 +236,7 @@ async function executeStartRound(deps, uid, dataIn) {
 async function executeMarkRevealReady(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const privateStateRef = roomRef.collection('privateState').doc('current');
     const nowMs = getCurrentTime(deps);
@@ -233,6 +260,8 @@ async function executeMarkRevealReady(deps, uid, dataIn) {
         if (gameState.phase !== 'REVEAL') {
             throw new errors_1.FunctionActionError('failed-precondition', 'Reveal phase is not active.');
         }
+        const privateState = privateSnap.data();
+        assertMatchStateSync(gameState, privateState);
         const existingReady = Array.isArray(gameState.readyPlayers)
             ? gameState.readyPlayers
             : [];
@@ -256,6 +285,7 @@ async function executeMarkRevealReady(deps, uid, dataIn) {
                     currentTurnIndex: 0,
                     turnEndsAt: nowMs + turnDuration * 1000,
                     turnsCompleted: false,
+                    votingStartedAt: null,
                     clues: [],
                 },
                 updatedAt: deps.serverTimestamp(),
@@ -273,11 +303,12 @@ async function executeMarkRevealReady(deps, uid, dataIn) {
 async function executeSubmitClue(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    const text = typeof dataIn?.text === 'string' ? dataIn.text.trim().slice(0, 80) : '';
-    if (!roomId || !text) {
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    const text = sanitizePlainText(dataIn?.text, 80);
+    if (!text) {
         throw new errors_1.FunctionActionError('invalid-argument', 'Clue text is required.');
     }
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.submitClue);
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const nowMs = getCurrentTime(deps);
     await deps.db.runTransaction(async (tx) => {
@@ -299,7 +330,10 @@ async function executeSubmitClue(deps, uid, dataIn) {
         }
         const turnOrder = Array.isArray(gameState.turnOrder) ? gameState.turnOrder : [];
         const currentIndex = Number(gameState.currentTurnIndex || 0);
-        if (turnOrder[currentIndex] !== uid) {
+        if (turnOrder.length === 0 ||
+            currentIndex < 0 ||
+            currentIndex >= turnOrder.length ||
+            turnOrder[currentIndex] !== uid) {
             throw new errors_1.FunctionActionError('permission-denied', 'It is not your turn to speak.');
         }
         const clue = {
@@ -322,11 +356,13 @@ async function executeSubmitClue(deps, uid, dataIn) {
 async function executeAdvanceTurn(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
     const reason = dataIn?.reason === 'timeout' ? 'timeout' : 'skip';
-    const expectedTurnIndex = typeof dataIn?.expectedTurnIndex === 'number' ? dataIn.expectedTurnIndex : null;
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const expectedTurnIndex = typeof dataIn?.expectedTurnIndex === 'number' &&
+        Number.isInteger(dataIn.expectedTurnIndex) &&
+        dataIn.expectedTurnIndex >= 0
+        ? dataIn.expectedTurnIndex
+        : null;
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const nowMs = getCurrentTime(deps);
     await deps.db.runTransaction(async (tx) => {
@@ -395,11 +431,10 @@ async function executeAdvanceTurn(deps, uid, dataIn) {
 async function executeStartVoting(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const privateStateRef = roomRef.collection('privateState').doc('current');
+    const nowMs = getCurrentTime(deps);
     await deps.db.runTransaction(async (tx) => {
         const [roomSnap, privateSnap] = await Promise.all([
             tx.get(roomRef),
@@ -413,17 +448,24 @@ async function executeStartVoting(deps, uid, dataIn) {
         if (!players.some((p) => p.uid === uid) || data.hostId !== uid) {
             throw new errors_1.FunctionActionError('permission-denied', 'Only host can start voting.');
         }
-        if (data.status !== 'playing' || data.gameState?.phase !== 'PLAYING') {
+        const gameState = data.gameState || {};
+        if (data.status !== 'playing' || gameState.phase !== 'PLAYING') {
             throw new errors_1.FunctionActionError('failed-precondition', 'Voting can only start from active PLAYING phase.');
         }
+        if (gameState.turnsCompleted !== true) {
+            throw new errors_1.FunctionActionError('failed-precondition', 'Cannot start voting before all active players finish their turns.');
+        }
+        const privateState = privateSnap.data();
+        assertMatchStateSync(gameState, privateState);
         tx.update(privateStateRef, {
             votesByUid: {},
             updatedAt: deps.serverTimestamp(),
         });
         tx.update(roomRef, {
             gameState: {
-                ...data.gameState,
+                ...gameState,
                 phase: 'VOTING',
+                votingStartedAt: nowMs,
                 readyPlayers: [],
                 votedUids: [],
                 turnEndsAt: null,
@@ -440,11 +482,12 @@ async function executeStartVoting(deps, uid, dataIn) {
 async function executeSubmitVote(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    const suspectUid = typeof dataIn?.suspectUid === 'string' ? dataIn.suspectUid.trim() : '';
-    if (!roomId || !suspectUid || suspectUid === uid) {
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    const suspectUid = assertSafeId(dataIn?.suspectUid, 'suspectUid');
+    if (suspectUid === uid) {
         throw new errors_1.FunctionActionError('invalid-argument', 'Invalid vote target.');
     }
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.submitVote);
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const privateStateRef = roomRef.collection('privateState').doc('current');
     await deps.db.runTransaction(async (tx) => {
@@ -467,6 +510,7 @@ async function executeSubmitVote(deps, uid, dataIn) {
             throw new errors_1.FunctionActionError('permission-denied', 'Both voter and target must be alive room members.');
         }
         const privateState = privateSnap.data();
+        assertMatchStateSync(gameState, privateState);
         const existingVotes = privateState.votesByUid || {};
         if (Object.prototype.hasOwnProperty.call(existingVotes, uid)) {
             throw new errors_1.FunctionActionError('failed-precondition', 'You have already voted in this round.');
@@ -488,6 +532,7 @@ async function executeSubmitVote(deps, uid, dataIn) {
                     gameState: {
                         ...gameState,
                         phase: 'REVEAL_VOTE_RESULT',
+                        votingStartedAt: null,
                         votedUids,
                         mostVotedId: tally.mostVotedId,
                         mostVotedRevealedRole: revealedRole,
@@ -509,11 +554,10 @@ async function executeSubmitVote(deps, uid, dataIn) {
 async function executeResolveVotes(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const privateStateRef = roomRef.collection('privateState').doc('current');
+    const nowMs = getCurrentTime(deps);
     await deps.db.runTransaction(async (tx) => {
         const [roomSnap, privateSnap] = await Promise.all([
             tx.get(roomRef),
@@ -531,9 +575,23 @@ async function executeResolveVotes(deps, uid, dataIn) {
         if (data.status !== 'playing' || gameState.phase !== 'VOTING') {
             throw new errors_1.FunctionActionError('failed-precondition', 'Votes can only be resolved during VOTING phase.');
         }
-        const aliveUids = new Set(players.filter((p) => !p.isEliminated).map((p) => p.uid));
         const privateState = privateSnap.data();
+        assertMatchStateSync(gameState, privateState);
+        const aliveUids = new Set(players.filter((p) => !p.isEliminated).map((p) => p.uid));
         const votesByUid = privateState.votesByUid || {};
+        const validVoterCount = Object.keys(votesByUid).filter((voterUid) => aliveUids.has(voterUid) && aliveUids.has(votesByUid[voterUid])).length;
+        const allVoted = aliveUids.size > 0 && validVoterCount >= aliveUids.size;
+        if (!allVoted) {
+            const requiredMajority = getRequiredMajorityVotes(aliveUids.size);
+            if (validVoterCount < requiredMajority) {
+                throw new errors_1.FunctionActionError('failed-precondition', `At least ${requiredMajority} alive votes are required for early vote resolution.`);
+            }
+            const votingStartedAt = typeof gameState.votingStartedAt === 'number' ? gameState.votingStartedAt : null;
+            if (votingStartedAt === null ||
+                nowMs - votingStartedAt < exports.FORCE_RESOLVE_MIN_ELAPSED_MS) {
+                throw new errors_1.FunctionActionError('failed-precondition', 'Cannot force resolve votes before the minimum voting window has elapsed.');
+            }
+        }
         const tally = (0, gameLogic_1.tallyVotesServer)(votesByUid, aliveUids);
         if (!tally) {
             throw new errors_1.FunctionActionError('failed-precondition', 'No valid votes cast yet.');
@@ -546,6 +604,7 @@ async function executeResolveVotes(deps, uid, dataIn) {
             gameState: {
                 ...gameState,
                 phase: 'REVEAL_VOTE_RESULT',
+                votingStartedAt: null,
                 mostVotedId: tally.mostVotedId,
                 mostVotedRevealedRole: revealedRole,
                 votersForEliminated,
@@ -559,9 +618,7 @@ async function executeResolveVotes(deps, uid, dataIn) {
 async function executeProceedAfterVoteReveal(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const privateStateRef = roomRef.collection('privateState').doc('current');
     const nowMs = getCurrentTime(deps);
@@ -585,7 +642,12 @@ async function executeProceedAfterVoteReveal(deps, uid, dataIn) {
             throw new errors_1.FunctionActionError('failed-precondition', 'Can only proceed from REVEAL_VOTE_RESULT phase.');
         }
         const privateState = privateSnap.data();
+        assertMatchStateSync(gameState, privateState);
         const targetUid = gameState.mostVotedId;
+        const targetPlayer = players.find((p) => p.uid === targetUid && !p.isEliminated);
+        if (!targetPlayer) {
+            throw new errors_1.FunctionActionError('failed-precondition', 'Voted player is no longer active in this match.');
+        }
         const targetRole = privateState.rolesByUid[targetUid] || 'citizen';
         if (targetRole === 'mrwhite') {
             tx.update(roomRef, {
@@ -647,6 +709,7 @@ async function executeProceedAfterVoteReveal(deps, uid, dataIn) {
                 currentTurnIndex: 0,
                 turnEndsAt: nowMs + turnDuration * 1000,
                 turnsCompleted: false,
+                votingStartedAt: null,
                 votedUids: [],
                 mostVotedId: null,
                 mostVotedRevealedRole: null,
@@ -661,11 +724,10 @@ async function executeProceedAfterVoteReveal(deps, uid, dataIn) {
 async function executeSubmitMrWhiteGuess(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    const guess = typeof dataIn?.guess === 'string' ? dataIn.guess.trim().slice(0, 80) : '';
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    const guess = sanitizePlainText(dataIn?.guess, 80);
     const forceEliminateMissing = Boolean(dataIn?.forceEliminateMissing);
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.submitMrWhiteGuess);
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const privateStateRef = roomRef.collection('privateState').doc('current');
     const nowMs = getCurrentTime(deps);
@@ -683,15 +745,19 @@ async function executeSubmitMrWhiteGuess(deps, uid, dataIn) {
             throw new errors_1.FunctionActionError('failed-precondition', 'Not currently in guess phase.');
         }
         const privateState = privateSnap.data();
+        assertMatchStateSync(gameState, privateState);
         const guesserUid = gameState.guesserUid || gameState.mostVotedId || '';
+        if (!guesserUid || privateState.rolesByUid[guesserUid] !== 'mrwhite') {
+            throw new errors_1.FunctionActionError('failed-precondition', 'Invalid Mr. White guesser state.');
+        }
         const players = Array.isArray(data.players) ? data.players : [];
         const guesserStillInRoom = players.some((p) => p.uid === guesserUid);
         if (forceEliminateMissing) {
-            if (data.hostId !== uid || guesserStillInRoom) {
+            if (data.hostId !== uid || !players.some((p) => p.uid === uid) || guesserStillInRoom) {
                 throw new errors_1.FunctionActionError('permission-denied', 'Force eliminate is only allowed by host when guesser is absent.');
             }
         }
-        else if (uid !== guesserUid) {
+        else if (uid !== guesserUid || !guesserStillInRoom) {
             throw new errors_1.FunctionActionError('permission-denied', 'Only caught Mr. White can submit the guess.');
         }
         const isCorrect = !forceEliminateMissing && (0, wordData_1.isMrWhiteGuessMatch)(guess, privateState.civilianWord);
@@ -763,6 +829,7 @@ async function executeSubmitMrWhiteGuess(deps, uid, dataIn) {
                 currentTurnIndex: 0,
                 turnEndsAt: nowMs + turnDuration * 1000,
                 turnsCompleted: false,
+                votingStartedAt: null,
                 votedUids: [],
                 mostVotedId: null,
                 mostVotedRevealedRole: null,
@@ -778,16 +845,19 @@ async function executeSubmitMrWhiteGuess(deps, uid, dataIn) {
 async function executeReturnToLobby(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
     const roomRef = deps.db.collection('rooms').doc(roomId);
+    const privateStateRef = roomRef.collection('privateState').doc('current');
     await deps.db.runTransaction(async (tx) => {
-        const snap = await tx.get(roomRef);
+        const [snap, privateSnap] = await Promise.all([
+            tx.get(roomRef),
+            tx.get(privateStateRef),
+        ]);
         if (!snap.exists)
             throw new errors_1.FunctionActionError('not-found', 'Room not found.');
         const data = snap.data();
-        if (data.hostId !== uid) {
+        const currentPlayers = Array.isArray(data.players) ? data.players : [];
+        if (data.hostId !== uid || !currentPlayers.some((p) => p.uid === uid)) {
             throw new errors_1.FunctionActionError('permission-denied', 'Only host can return to lobby.');
         }
         const phase = data.gameState?.phase;
@@ -796,9 +866,26 @@ async function executeReturnToLobby(deps, uid, dataIn) {
         if (!allowedStatus || !allowedPhase) {
             throw new errors_1.FunctionActionError('failed-precondition', 'Can only return to lobby after match completion or before round starts.');
         }
-        const currentPlayers = Array.isArray(data.players) ? data.players : [];
         for (const p of currentPlayers) {
             tx.delete(roomRef.collection('privatePlayers').doc(p.uid));
+        }
+        if (privateSnap.exists) {
+            const prevSettled = Array.isArray(privateSnap.data()?.settledMatches)
+                ? privateSnap.data().settledMatches
+                : [];
+            tx.set(privateStateRef, {
+                matchId: '',
+                round: 0,
+                civilianWord: '',
+                undercoverWord: '',
+                decoys: [],
+                impostorIds: [],
+                undercoverIds: [],
+                rolesByUid: {},
+                votesByUid: {},
+                settledMatches: prevSettled,
+                updatedAt: deps.serverTimestamp(),
+            });
         }
         const resetPlayers = currentPlayers.map((p) => ({
             uid: p.uid,
@@ -821,25 +908,46 @@ async function executeReturnToLobby(deps, uid, dataIn) {
 async function executeNextMatch(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.nextMatch);
     const roomRef = deps.db.collection('rooms').doc(roomId);
+    const privateStateRef = roomRef.collection('privateState').doc('current');
     await deps.db.runTransaction(async (tx) => {
-        const snap = await tx.get(roomRef);
+        const [snap, privateSnap] = await Promise.all([
+            tx.get(roomRef),
+            tx.get(privateStateRef),
+        ]);
         if (!snap.exists)
             throw new errors_1.FunctionActionError('not-found', 'Room not found.');
         const data = snap.data();
-        if (data.hostId !== uid) {
+        const currentPlayers = Array.isArray(data.players) ? data.players : [];
+        if (data.hostId !== uid || !currentPlayers.some((p) => p.uid === uid)) {
             throw new errors_1.FunctionActionError('permission-denied', 'Only host can prepare next match.');
         }
         const allowedStatus = data.status === 'playing' || data.status === 'finished';
         if (!allowedStatus || data.gameState?.phase !== 'RESULT') {
             throw new errors_1.FunctionActionError('failed-precondition', 'Next match can only start after the current match is finished.');
         }
-        const currentPlayers = Array.isArray(data.players) ? data.players : [];
         for (const p of currentPlayers) {
             tx.delete(roomRef.collection('privatePlayers').doc(p.uid));
+        }
+        if (privateSnap.exists) {
+            const prevSettled = Array.isArray(privateSnap.data()?.settledMatches)
+                ? privateSnap.data().settledMatches
+                : [];
+            tx.set(privateStateRef, {
+                matchId: '',
+                round: 0,
+                civilianWord: '',
+                undercoverWord: '',
+                decoys: [],
+                impostorIds: [],
+                undercoverIds: [],
+                rolesByUid: {},
+                votesByUid: {},
+                settledMatches: prevSettled,
+                updatedAt: deps.serverTimestamp(),
+            });
         }
         const resetPlayers = currentPlayers.map((p) => ({
             ...p,

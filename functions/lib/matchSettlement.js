@@ -40,9 +40,11 @@ function applyMatchSettlementWrites(params) {
             revealedRole: role,
         };
     });
+    const winnersByUid = {};
     if (!alreadySettled) {
         for (const p of players) {
             const { xpDelta, isWinner } = (0, gameLogic_1.computePlayerOnlineReward)(p.uid, players, privateState.rolesByUid, privateState.votesByUid || {}, winner, winReason, winningMrWhiteUid);
+            winnersByUid[p.uid] = isWinner;
             const entry = profileMap.get(p.uid);
             if (!entry)
                 continue;
@@ -112,6 +114,12 @@ function applyMatchSettlementWrites(params) {
             updatedAt: serverTimestamp(),
         });
     }
+    else {
+        for (const p of players) {
+            const { isWinner } = (0, gameLogic_1.computePlayerOnlineReward)(p.uid, players, privateState.rolesByUid, privateState.votesByUid || {}, winner, winReason, winningMrWhiteUid);
+            winnersByUid[p.uid] = isWinner;
+        }
+    }
     const publicGameState = {
         ...(roomData.gameState || {}),
         phase: 'RESULT',
@@ -127,6 +135,7 @@ function applyMatchSettlementWrites(params) {
             undercoverIds: privateState.undercoverIds || [],
             rolesByUid: privateState.rolesByUid,
             votesByUid: privateState.votesByUid || {},
+            winnersByUid,
         },
     };
     tx.update(roomRef, {

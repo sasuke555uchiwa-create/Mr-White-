@@ -284,5 +284,10 @@ service cloud.firestore {
       );
       allow create, update, delete: if false;
     }
+
+    // 8. Server-Only Rate Limit Buckets (Admin SDK only)
+    match /rateLimits/{limitId} {
+      allow read, write: if false;
+    }
   }
 }

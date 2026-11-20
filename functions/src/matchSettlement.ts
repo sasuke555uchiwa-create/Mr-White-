@@ -110,6 +110,7 @@ export function applyMatchSettlementWrites(params: {
     };
   });
 
+  const winnersByUid: Record<string, boolean> = {};
   if (!alreadySettled) {
     for (const p of players) {
       const { xpDelta, isWinner } = computePlayerOnlineReward(
@@ -121,6 +122,7 @@ export function applyMatchSettlementWrites(params: {
         winReason,
         winningMrWhiteUid
       );
+      winnersByUid[p.uid] = isWinner;
       const entry = profileMap.get(p.uid);
       if (!entry) continue;
 
@@ -195,6 +197,19 @@ export function applyMatchSettlementWrites(params: {
       settledMatches: nextSettled,
       updatedAt: serverTimestamp(),
     });
+  } else {
+    for (const p of players) {
+      const { isWinner } = computePlayerOnlineReward(
+        p.uid,
+        players,
+        privateState.rolesByUid,
+        privateState.votesByUid || {},
+        winner,
+        winReason,
+        winningMrWhiteUid
+      );
+      winnersByUid[p.uid] = isWinner;
+    }
   }
 
   const publicGameState = {
@@ -212,6 +227,7 @@ export function applyMatchSettlementWrites(params: {
       undercoverIds: privateState.undercoverIds || [],
       rolesByUid: privateState.rolesByUid,
       votesByUid: privateState.votesByUid || {},
+      winnersByUid,
     },
   };
 

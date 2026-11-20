@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { DESIGNATED_OWNER_EMAIL, executeCheckAdminStatus } from '../functions/src/adminPolicy';
 import { DbLike, DocRefLike, TxLike } from '../functions/src/errors';
 import {
+  FORCE_RESOLVE_MIN_ELAPSED_MS,
   executeAdvanceTurn,
   executeBeginMatch,
   executeNextMatch,
+  executeProceedAfterVoteReveal,
   executeResolveVotes,
   executeReturnToLobby,
   executeStartRound,
@@ -18,6 +20,12 @@ import {
   executeKickPlayer,
   executeQuickJoinRoom,
 } from '../functions/src/roomHandlers';
+import {
+  executeAcceptFriendRequest,
+  executeRemoveFriend,
+  executeSendFriendRequest,
+} from '../functions/src/socialHandlers';
+import { RATE_LIMITS, enforceRateLimit } from '../functions/src/rateLimit';
 import { buildPublicProfileBackfill } from '../utils/profileBackfill';
 import { SPECIAL_ROLES } from '../data/specialRoles';
 
@@ -697,7 +705,12 @@ describe('P0 & P1 Security Audit Regression Suite', () => {
 
   it('9. Duplicate submitVote and duplicate startVoting/resolveVotes are strictly blocked', async () => {
     const db = new InMemoryFirestore();
-    const deps = createDeps(db);
+    let currentNow = 1_700_000_000_000;
+    const deps = {
+      db,
+      serverTimestamp: () => 'SERVER_TS',
+      now: () => currentNow,
+    };
 
     db.setRaw('rooms/rv1', {
       id: 'rv1',
@@ -707,9 +720,11 @@ describe('P0 & P1 Security Audit Regression Suite', () => {
       players: [makePlayer('p1'), makePlayer('p2'), makePlayer('p3')],
       gameState: {
         phase: 'PLAYING',
+        matchId: 'mv1',
         round: 1,
         turnOrder: ['p1', 'p2', 'p3'],
-        currentTurnIndex: 0,
+        currentTurnIndex: 2,
+        turnsCompleted: true,
       },
     });
     db.setRaw('rooms/rv1/privateState/current', {
@@ -733,6 +748,9 @@ describe('P0 & P1 Security Audit Regression Suite', () => {
     await expect(
       executeSubmitVote(deps, 'p1', { roomId: 'rv1', suspectUid: 'p2' })
     ).rejects.toThrow(/already voted/i);
+
+    await executeSubmitVote(deps, 'p2', { roomId: 'rv1', suspectUid: 'p3' });
+    currentNow += FORCE_RESOLVE_MIN_ELAPSED_MS + 100;
 
     await executeResolveVotes(deps, 'p1', { roomId: 'rv1' });
     // Duplicate resolveVotes blocked after phase transitioned to REVEAL_VOTE_RESULT
@@ -765,5 +783,187 @@ describe('P0 & P1 Security Audit Regression Suite', () => {
 
     // Local Pass & Play Special Roles remain preserved
     expect(SPECIAL_ROLES.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('12. executeStartVoting rejects incomplete clues/non-host & executeResolveVotes enforces early quorum + 15s elapsed rule', async () => {
+    const db = new InMemoryFirestore();
+    let currentNow = 1_700_000_000_000;
+    const deps = {
+      db,
+      serverTimestamp: () => 'SERVER_TS',
+      now: () => currentNow,
+    };
+
+    db.setRaw('rooms/rv2', {
+      id: 'rv2',
+      hostId: 'p1',
+      status: 'playing',
+      playerIds: ['p1', 'p2', 'p3', 'p4'],
+      players: [makePlayer('p1'), makePlayer('p2'), makePlayer('p3'), makePlayer('p4')],
+      gameState: {
+        phase: 'PLAYING',
+        matchId: 'mv2',
+        round: 1,
+        turnOrder: ['p1', 'p2', 'p3', 'p4'],
+        currentTurnIndex: 0,
+        turnsCompleted: false,
+      },
+    });
+    db.setRaw('rooms/rv2/privateState/current', {
+      matchId: 'mv2',
+      round: 1,
+      civilianWord: 'شمس',
+      undercoverWord: 'قمر',
+      decoys: [],
+      impostorIds: ['p4'],
+      undercoverIds: [],
+      rolesByUid: { p1: 'citizen', p2: 'citizen', p3: 'citizen', p4: 'mrwhite' },
+      votesByUid: {},
+      settledMatches: [],
+    });
+
+    // Cannot skip clues even as host
+    await expect(executeStartVoting(deps, 'p1', { roomId: 'rv2' })).rejects.toThrow(
+      /finish their turns/i
+    );
+
+    // Mark turns completed; non-host still rejected
+    const rPlaying = db.getRaw('rooms/rv2')!;
+    rPlaying.gameState.turnsCompleted = true;
+    db.setRaw('rooms/rv2', rPlaying);
+    await expect(executeStartVoting(deps, 'p2', { roomId: 'rv2' })).rejects.toThrow(
+      /Only host/i
+    );
+
+    // Host starts voting after clues complete -> stamps votingStartedAt
+    await executeStartVoting(deps, 'p1', { roomId: 'rv2' });
+    expect(db.getRaw('rooms/rv2')!.gameState.phase).toBe('VOTING');
+    expect(db.getRaw('rooms/rv2')!.gameState.votingStartedAt).toBe(currentNow);
+
+    // 1 vote only (below majority=3 for 4 alive) + 20s elapsed -> still rejected
+    await executeSubmitVote(deps, 'p1', { roomId: 'rv2', suspectUid: 'p4' });
+    currentNow += 20_000;
+    await expect(executeResolveVotes(deps, 'p1', { roomId: 'rv2' })).rejects.toThrow(
+      /At least 3 alive votes/i
+    );
+
+    // Reset clock window relative to votingStartedAt test: add 2 more votes (3/4 = majority) at +5s -> rejected before 15s
+    const rv2 = db.getRaw('rooms/rv2')!;
+    rv2.gameState.votingStartedAt = currentNow - 5_000;
+    db.setRaw('rooms/rv2', rv2);
+    await executeSubmitVote(deps, 'p2', { roomId: 'rv2', suspectUid: 'p4' });
+    await executeSubmitVote(deps, 'p3', { roomId: 'rv2', suspectUid: 'p4' });
+    await expect(executeResolveVotes(deps, 'p1', { roomId: 'rv2' })).rejects.toThrow(
+      /minimum voting window/i
+    );
+
+    // Once >= 15s elapsed and quorum reached -> forced resolution succeeds
+    currentNow += 11_000;
+    await executeResolveVotes(deps, 'p1', { roomId: 'rv2' });
+    const afterResolve = db.getRaw('rooms/rv2')!;
+    expect(afterResolve.gameState.phase).toBe('REVEAL_VOTE_RESULT');
+    expect(afterResolve.gameState.mostVotedId).toBe('p4');
+    expect(afterResolve.gameState.votingStartedAt).toBeNull();
+  });
+
+  it('13. Rejects stale matchId/round transitions & clears privateState secrets on returnToLobby while keeping settledMatches', async () => {
+    const db = new InMemoryFirestore();
+    const deps = createDeps(db);
+
+    db.setRaw('rooms/rs1', {
+      id: 'rs1',
+      hostId: 'p1',
+      status: 'playing',
+      playerIds: ['p1', 'p2', 'p3'],
+      players: [makePlayer('p1'), makePlayer('p2'), makePlayer('p3')],
+      gameState: {
+        phase: 'REVEAL_VOTE_RESULT',
+        matchId: 'new_match',
+        round: 2,
+        mostVotedId: 'p3',
+        mostVotedRevealedRole: 'citizen',
+      },
+    });
+    db.setRaw('rooms/rs1/privateState/current', {
+      matchId: 'old_match',
+      round: 1,
+      civilianWord: 'بحر',
+      undercoverWord: 'نهر',
+      decoys: [],
+      impostorIds: ['p2'],
+      undercoverIds: [],
+      rolesByUid: { p1: 'citizen', p2: 'mrwhite', p3: 'citizen' },
+      votesByUid: {},
+      settledMatches: ['old_match'],
+    });
+
+    await expect(
+      executeProceedAfterVoteReveal(deps, 'p1', { roomId: 'rs1' })
+    ).rejects.toThrow(/Stale/i);
+
+    // Synchronize state -> returnToLobby allowed from RESULT & wipes sensitive secrets
+    const rs = db.getRaw('rooms/rs1')!;
+    rs.gameState.phase = 'RESULT';
+    rs.gameState.matchId = 'old_match';
+    rs.gameState.round = 1;
+    db.setRaw('rooms/rs1', rs);
+
+    await executeReturnToLobby(deps, 'p1', { roomId: 'rs1' });
+    const wipedPriv = db.getRaw('rooms/rs1/privateState/current')!;
+    expect(wipedPriv.civilianWord).toBe('');
+    expect(wipedPriv.undercoverWord).toBe('');
+    expect(wipedPriv.rolesByUid).toEqual({});
+    expect(wipedPriv.settledMatches).toEqual(['old_match']);
+  });
+
+  it('14. Social friend handlers enforce lifecycle, target validation, and composite IDs > 128 chars', async () => {
+    const db = new InMemoryFirestore();
+    const deps = createDeps(db);
+    const longAlice = 'a'.repeat(100);
+    const longBob = 'b'.repeat(100);
+
+    db.setRaw(`publicProfiles/${longAlice}`, { uid: longAlice, displayName: 'AliceLong' });
+    db.setRaw(`publicProfiles/${longBob}`, { uid: longBob, displayName: 'BobLong' });
+
+    await expect(
+      executeSendFriendRequest(deps, longAlice, { toId: longAlice })
+    ).rejects.toThrow(/yourself/i);
+
+    const sent = await executeSendFriendRequest(deps, longAlice, { toId: longBob });
+    expect(sent.success).toBe(true);
+    expect(sent.requestId).toBe(`${longAlice}_${longBob}`);
+    expect(sent.requestId!.length).toBe(201);
+
+    // Sender cannot accept own outgoing request
+    await expect(
+      executeAcceptFriendRequest(deps, longAlice, { requestId: sent.requestId })
+    ).rejects.toThrow(/Only the recipient/i);
+
+    const accepted = await executeAcceptFriendRequest(deps, longBob, {
+      requestId: sent.requestId,
+    });
+    expect(accepted.success).toBe(true);
+
+    const removed = await executeRemoveFriend(deps, longAlice, { friendUid: longBob });
+    expect(removed.success).toBe(true);
+  });
+
+  it('15. Transactional rate limiter blocks abusive bursts and resets after window expiration', async () => {
+    const db = new InMemoryFirestore();
+    let currentNow = 1_700_000_000_000;
+    const deps = { db, now: () => currentNow };
+    const uid = 'burst_user';
+
+    for (let i = 0; i < RATE_LIMITS.createRoom.maxRequests; i += 1) {
+      await enforceRateLimit(deps, uid, RATE_LIMITS.createRoom);
+    }
+
+    await expect(
+      enforceRateLimit(deps, uid, RATE_LIMITS.createRoom)
+    ).rejects.toThrow(/Rate limit exceeded/i);
+
+    // Once window elapses, quota resets cleanly
+    currentNow += RATE_LIMITS.createRoom.windowMs + 10;
+    await expect(enforceRateLimit(deps, uid, RATE_LIMITS.createRoom)).resolves.toBeUndefined();
   });
 });

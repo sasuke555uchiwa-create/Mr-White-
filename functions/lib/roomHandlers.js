@@ -13,10 +13,22 @@ const crypto_1 = require("crypto");
 const errors_1 = require("./errors");
 const gameLogic_1 = require("./gameLogic");
 const matchSettlement_1 = require("./matchSettlement");
+const rateLimit_1 = require("./rateLimit");
 const ALLOWED_LANGUAGES = new Set(['ar', 'en', 'fr', 'es', 'de', 'tr', 'pt']);
 const ALLOWED_CATEGORIES = new Set(['standard', 'animals', 'food', 'places', 'objects']);
 function getCurrentTime(deps) {
     return deps.now ? deps.now() : Date.now();
+}
+function assertSafeId(value, label = 'identifier') {
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{2,128}$/.test(value.trim())) {
+        throw new errors_1.FunctionActionError('invalid-argument', `Invalid ${label}.`);
+    }
+    return value.trim();
+}
+function sanitizePlainText(value, maxLen) {
+    if (typeof value !== 'string')
+        return '';
+    return value.replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, maxLen);
 }
 function sanitizeRoomSettings(raw) {
     const maxPlayersNum = Number(raw?.maxPlayers ?? 8);
@@ -239,6 +251,7 @@ function applyMemberRemovalInTx(params) {
             gameState.mostVotedId = null;
             gameState.mostVotedRevealedRole = null;
             gameState.votersForEliminated = [];
+            gameState.votingStartedAt = null;
             gameState.tieBroken = false;
             shouldUpdatePrivateStateVotes = true;
             privateStateRoundPatch = nextRound;
@@ -258,6 +271,7 @@ function applyMemberRemovalInTx(params) {
             gameState.mostVotedRevealedRole = null;
             gameState.votersForEliminated = [];
             gameState.guesserUid = null;
+            gameState.votingStartedAt = null;
             gameState.tieBroken = false;
             shouldUpdatePrivateStateVotes = true;
             privateStateRoundPatch = nextRound;
@@ -294,6 +308,7 @@ function applyMemberRemovalInTx(params) {
 async function executeCreateRoom(deps, uid, authToken, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.createRoom);
     const settings = sanitizeRoomSettings(dataIn || {});
     const hostInfo = await resolveCallerPlayerInfo(deps.db, uid, authToken);
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -380,6 +395,7 @@ async function executeCreateRoom(deps, uid, authToken, dataIn) {
 async function executeJoinRoom(deps, uid, authToken, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.joinRoom);
     const rawRoomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
     const rawCode = typeof dataIn?.secretCode === 'string' ? dataIn.secretCode.trim() : '';
     let targetRoomId = rawRoomId;
@@ -393,9 +409,7 @@ async function executeJoinRoom(deps, uid, authToken, dataIn) {
         }
         targetRoomId = codeSnap.data()?.roomId || '';
     }
-    if (!targetRoomId || !/^[a-zA-Z0-9_-]{3,128}$/.test(targetRoomId)) {
-        throw new errors_1.FunctionActionError('invalid-argument', 'Invalid room ID.');
-    }
+    targetRoomId = assertSafeId(targetRoomId, 'room ID');
     const callerInfo = await resolveCallerPlayerInfo(deps.db, uid, authToken);
     const roomRef = deps.db.collection('rooms').doc(targetRoomId);
     const inviteRef = roomRef.collection('privateMeta').doc('invite');
@@ -451,6 +465,7 @@ async function executeJoinRoom(deps, uid, authToken, dataIn) {
 async function executeQuickJoinRoom(deps, uid, authToken) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.quickJoinRoom);
     const callerInfo = await resolveCallerPlayerInfo(deps.db, uid, authToken);
     const candidatesSnap = await deps.db
         .collection('rooms')
@@ -554,11 +569,12 @@ async function executeLeaveRoom(deps, uid, dataIn) {
 async function executeKickPlayer(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    const targetUid = typeof dataIn?.targetUid === 'string' ? dataIn.targetUid.trim() : '';
-    if (!roomId || !targetUid || targetUid === uid) {
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    const targetUid = assertSafeId(dataIn?.targetUid, 'targetUid');
+    if (targetUid === uid) {
         throw new errors_1.FunctionActionError('invalid-argument', 'Invalid kick parameters.');
     }
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.kickPlayer);
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const privateStateRef = roomRef.collection('privateState').doc('current');
     const result = await deps.db.runTransaction(async (tx) => {
@@ -668,9 +684,8 @@ async function executePromoteHost(deps, uid, dataIn) {
 async function executeToggleReady(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.toggleReady);
     const roomRef = deps.db.collection('rooms').doc(roomId);
     await deps.db.runTransaction(async (tx) => {
         const snap = await tx.get(roomRef);
@@ -696,11 +711,12 @@ async function executeToggleReady(deps, uid, dataIn) {
 async function executeSendRoomChat(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    const text = typeof dataIn?.text === 'string' ? dataIn.text.trim().slice(0, 200) : '';
-    if (!roomId || !text) {
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    const text = sanitizePlainText(dataIn?.text, 200);
+    if (!text) {
         throw new errors_1.FunctionActionError('invalid-argument', 'Invalid chat message.');
     }
+    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.sendRoomChat);
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const nowIso = new Date(getCurrentTime(deps)).toISOString();
     await deps.db.runTransaction(async (tx) => {
@@ -715,7 +731,7 @@ async function executeSendRoomChat(deps, uid, dataIn) {
         }
         const existing = Array.isArray(data.messages) ? data.messages : [];
         const msg = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            id: `${getCurrentTime(deps)}-${Math.random().toString(36).slice(2, 7)}`,
             senderId: uid,
             senderName: member.name,
             text,

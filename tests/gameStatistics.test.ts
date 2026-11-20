@@ -162,4 +162,58 @@ describe('storageService cross-session statistics persistence', () => {
     expect(afterClear.offlinePlayers).toEqual({});
     expect(afterClear.onlinePlayed).toBe(1);
   });
+
+  it('preserves online match deduplication across 130+ offline matches and trusts cloud roleStats when caught up', async () => {
+    const storage = await import('../services/storageService');
+
+    storage.recordOnlineSessionMatch({
+      uid: 'u_2',
+      matchKey: 'roomZ:match99',
+      role: 'mrwhite',
+      won: true,
+    });
+
+    for (let i = 0; i < 130; i += 1) {
+      storage.recordOfflineSessionMatch({
+        uid: 'u_2',
+        matchKey: `offline_${i}`,
+        outcomes: [{ name: 'PlayerA', role: 'citizen', won: true }],
+      });
+    }
+
+    // Re-recording the same online matchKey must still be ignored after >120 offline matches
+    storage.recordOnlineSessionMatch({
+      uid: 'u_2',
+      matchKey: 'roomZ:match99',
+      role: 'mrwhite',
+      won: true,
+    });
+
+    const snap = storage.getSessionStats('u_2');
+    expect(snap.onlinePlayed).toBe(1);
+    expect(snap.onlineWins).toBe(1);
+
+    // When cloud profile.stats is caught up with local onlinePlayed, cloud roleStats wins even if stale local has extra bogus counts
+    snap.onlineRoleStats = {
+      citizen: { played: 99, wins: 99 },
+    };
+    const cloudStats = {
+      played: 5,
+      wins: 3,
+      hosted: 1,
+      longestStreak: 2,
+      currentStreak: 1,
+      roleStats: {
+        undercover: { played: 5, wins: 3 },
+      },
+    };
+    const resolved = computeGameStatistics({
+      filter: 'online',
+      serverStats: cloudStats,
+      sessionStats: snap,
+    });
+    expect(resolved.favoriteRole?.role).toBe('undercover');
+    expect(resolved.roles).toHaveLength(1);
+    expect(resolved.roles[0].played).toBe(5);
+  });
 });

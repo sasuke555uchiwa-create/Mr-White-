@@ -1,5 +1,6 @@
 import { FieldValue } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
+import { getCallableOptions } from './callableConfig';
 import { DbLike, FunctionActionError } from './errors';
 import { db } from './firebaseAdmin';
 import {
@@ -28,42 +29,44 @@ function handleCallable<T>(fn: () => Promise<T>): Promise<T> {
   });
 }
 
-export const createRoom = onCall((request) =>
+const callableOpts = getCallableOptions();
+
+export const createRoom = onCall(callableOpts, (request) =>
   handleCallable(() =>
     executeCreateRoom(deps, request.auth?.uid, request.auth?.token, request.data || {})
   )
 );
 
-export const joinRoom = onCall((request) =>
+export const joinRoom = onCall(callableOpts, (request) =>
   handleCallable(() =>
     executeJoinRoom(deps, request.auth?.uid, request.auth?.token, request.data || {})
   )
 );
 
-export const quickJoinRoom = onCall((request) =>
+export const quickJoinRoom = onCall(callableOpts, (request) =>
   handleCallable(() => executeQuickJoinRoom(deps, request.auth?.uid, request.auth?.token))
 );
 
-export const leaveRoom = onCall((request) =>
+export const leaveRoom = onCall(callableOpts, (request) =>
   handleCallable(() => executeLeaveRoom(deps, request.auth?.uid, request.data || {}))
 );
 
-export const updateRoomSettings = onCall((request) =>
+export const updateRoomSettings = onCall(callableOpts, (request) =>
   handleCallable(() => executeUpdateRoomSettings(deps, request.auth?.uid, request.data || {}))
 );
 
-export const kickPlayer = onCall((request) =>
+export const kickPlayer = onCall(callableOpts, (request) =>
   handleCallable(() => executeKickPlayer(deps, request.auth?.uid, request.data || {}))
 );
 
-export const promoteHost = onCall((request) =>
+export const promoteHost = onCall(callableOpts, (request) =>
   handleCallable(() => executePromoteHost(deps, request.auth?.uid, request.data || {}))
 );
 
-export const toggleReady = onCall((request) =>
+export const toggleReady = onCall(callableOpts, (request) =>
   handleCallable(() => executeToggleReady(deps, request.auth?.uid, request.data || {}))
 );
 
-export const sendRoomChat = onCall((request) =>
+export const sendRoomChat = onCall(callableOpts, (request) =>
   handleCallable(() => executeSendRoomChat(deps, request.auth?.uid, request.data || {}))
 );

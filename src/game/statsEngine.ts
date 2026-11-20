@@ -26,6 +26,7 @@ export interface SessionStatsSnapshot {
   offlineRoleStats: Record<string, RoleSessionRecord>;
   offlinePlayers: Record<string, LocalPlayerMatchStats>;
   recordedMatchIds: string[];
+  onlineRecordedMatchIds?: string[];
   updatedAt: number;
 }
 
@@ -76,6 +77,7 @@ export function createEmptySessionStatsSnapshot(): SessionStatsSnapshot {
     offlineRoleStats: {},
     offlinePlayers: {},
     recordedMatchIds: [],
+    onlineRecordedMatchIds: [],
     updatedAt: 0,
   };
 }
@@ -200,7 +202,11 @@ export function computeGameStatistics(params: {
   const onlineBestStreak = Math.max(sLongestStreak, sessionStats.onlineBestStreak);
   const onlineCurrentStreak =
     sPlayed >= sessionStats.onlinePlayed ? sCurrentStreak : sessionStats.onlineCurrentStreak;
-  const onlineRoles = mergeRoleMapsMax(serverRoles, normalizeRoleMap(sessionStats.onlineRoleStats));
+  const localOnlineRoles = normalizeRoleMap(sessionStats.onlineRoleStats);
+  const onlineRoles =
+    sPlayed >= sessionStats.onlinePlayed && Object.keys(serverRoles).length > 0
+      ? serverRoles
+      : mergeRoleMapsMax(serverRoles, localOnlineRoles);
 
   // Local Pass & Play metrics (aggregate or individual player)
   let localPlayed = 0;

@@ -107,6 +107,22 @@ describe('Firestore Security Rules', () => {
         civilianWord: 'قهوة',
         undercoverWord: 'شاي',
       });
+      await setDoc(doc(db, 'friendRequests', 'alice_bob'), {
+        fromId: 'alice',
+        toId: 'bob',
+        status: 'pending',
+      });
+      await setDoc(doc(db, 'friendships', 'alice_bob'), {
+        user1: 'alice',
+        user2: 'bob',
+      });
+      await setDoc(doc(db, 'rateLimits', 'createRoom_alice'), {
+        uid: 'alice',
+        action: 'createRoom',
+        windowStart: Date.now(),
+        count: 1,
+        expiresAt: Date.now() + 60_000,
+      });
     });
   });
 
@@ -325,6 +341,33 @@ describe('Firestore Security Rules', () => {
           limit(10)
         )
       )
+    );
+  });
+
+  it('ALLOWS participant reads on friendRequests & friendships, DENIES outsiders/writes, and DENIES rateLimits access', async () => {
+    const charlieDb = testEnv
+      .authenticatedContext('charlie', { email: 'charlie@example.com', email_verified: true })
+      .firestore();
+
+    await assertSucceeds(getDoc(doc(aliceDb(), 'friendRequests', 'alice_bob')));
+    await assertSucceeds(getDoc(doc(bobDb(), 'friendships', 'alice_bob')));
+
+    await assertFails(getDoc(doc(charlieDb, 'friendRequests', 'alice_bob')));
+    await assertFails(getDoc(doc(charlieDb, 'friendships', 'alice_bob')));
+    await assertFails(
+      setDoc(doc(aliceDb(), 'friendships', 'alice_charlie'), {
+        user1: 'alice',
+        user2: 'charlie',
+      })
+    );
+
+    await assertFails(getDoc(doc(aliceDb(), 'rateLimits', 'createRoom_alice')));
+    await assertFails(
+      setDoc(doc(aliceDb(), 'rateLimits', 'createRoom_alice'), {
+        uid: 'alice',
+        action: 'createRoom',
+        count: 0,
+      })
     );
   });
 });

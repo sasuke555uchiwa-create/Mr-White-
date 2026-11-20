@@ -352,6 +352,7 @@ import {
 
 const SESSION_STATS_KEY = 'chkoun_barra_session_stats';
 const MAX_RECORDED_MATCH_IDS = 120;
+const MAX_ONLINE_RECORDED_MATCH_IDS = 500;
 
 const sanitizeRoleStatsMap = (raw: unknown): Record<string, RoleSessionRecord> => {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
@@ -440,6 +441,11 @@ const sanitizeSessionStatsSnapshot = (raw: unknown): SessionStatsSnapshot => {
           .filter((id): id is string => typeof id === 'string' && id.length > 0)
           .slice(-MAX_RECORDED_MATCH_IDS)
       : [],
+    onlineRecordedMatchIds: Array.isArray(obj.onlineRecordedMatchIds)
+      ? obj.onlineRecordedMatchIds
+          .filter((id): id is string => typeof id === 'string' && id.length > 0)
+          .slice(-MAX_ONLINE_RECORDED_MATCH_IDS)
+      : [],
     updatedAt: safeNum(obj.updatedAt),
   };
 };
@@ -487,7 +493,14 @@ export const recordOnlineSessionMatch = (params: {
   const store = getSessionStatsStore();
   const current = store[scopeKey] || createEmptySessionStatsSnapshot();
 
-  if (!params.matchKey || current.recordedMatchIds.includes(params.matchKey)) {
+  const currentOnlineIds = Array.isArray(current.onlineRecordedMatchIds)
+    ? current.onlineRecordedMatchIds
+    : [];
+  if (
+    !params.matchKey ||
+    currentOnlineIds.includes(params.matchKey) ||
+    current.recordedMatchIds.includes(params.matchKey)
+  ) {
     return current;
   }
 
@@ -509,7 +522,9 @@ export const recordOnlineSessionMatch = (params: {
         wins: prevRole.wins + (params.won ? 1 : 0),
       },
     },
-    recordedMatchIds: [...current.recordedMatchIds, params.matchKey].slice(-MAX_RECORDED_MATCH_IDS),
+    onlineRecordedMatchIds: [...currentOnlineIds, params.matchKey].slice(
+      -MAX_ONLINE_RECORDED_MATCH_IDS
+    ),
     updatedAt: Date.now(),
   };
 

@@ -324,7 +324,8 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "backToLobby": "العودة لغرفة الانتظار",
     "autoSetupSummary": "توزيع تلقائي للأدوار",
     "errorOccurred": "حدث خطأ غير متوقع، يرجى المحاولة مرة أخرى.",
-    "onlineBackendUnavailable": "خادم اللعب أونلاين (Cloud Functions) غير مُفعّل أو غير متصل حالياً على هذا المشروع. يمكنك الاستمتاع باللعب المحلي الكامل أو نشر الدوال السحابية لتفعيل الأونلاين."
+    "onlineBackendUnavailable": "خادم اللعب أونلاين (Cloud Functions) غير مُفعّل أو غير متصل حالياً على هذا المشروع. يمكنك الاستمتاع باللعب المحلي الكامل أو نشر الدوال السحابية لتفعيل الأونلاين.",
+    "rateLimitExceeded": "لقد قمت بمحاولات كثيرة بسرعة. يرجى الانتظار لحظات والمحاولة مجدداً."
   },
   "en": {
     "exitGameConfirmation": "Are you sure you want to leave the game?",
@@ -650,7 +651,8 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "backToLobby": "Back to Lobby",
     "autoSetupSummary": "Smart auto role scaling",
     "errorOccurred": "An unexpected error occurred. Please try again.",
-    "onlineBackendUnavailable": "The online game backend (Cloud Functions) is not deployed on this Firebase project yet. Play Offline works fully, or deploy Firebase Functions to enable online rooms."
+    "onlineBackendUnavailable": "The online game backend (Cloud Functions) is not deployed on this Firebase project yet. Play Offline works fully, or deploy Firebase Functions to enable online rooms.",
+    "rateLimitExceeded": "Too many requests in a short time. Please wait a moment and try again."
   },
   "fr": {
     "exitGameConfirmation": "Êtes-vous sûr de vouloir quitter la partie ?",
@@ -901,7 +903,8 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "backToLobby": "Retour au salon",
     "autoSetupSummary": "Répartition automatique des rôles",
     "errorOccurred": "Une erreur inattendue est survenue. Veuillez réessayer.",
-    "onlineBackendUnavailable": "Le serveur de jeu en ligne (Cloud Functions) n'est pas encore déployé sur ce projet Firebase. Le mode hors ligne fonctionne pleinement."
+    "onlineBackendUnavailable": "Le serveur de jeu en ligne (Cloud Functions) n'est pas encore déployé sur ce projet Firebase. Le mode hors ligne fonctionne pleinement.",
+    "rateLimitExceeded": "Trop de requêtes en peu de temps. Veuillez patienter un instant."
   },
   "es": {
     "settings": "Ajustes",
@@ -951,7 +954,8 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "save": "Guardar",
     "noPermission": "No tienes permiso para realizar esta acción.",
     "errorOccurred": "Ocurrió un error inesperado. Inténtalo de nuevo.",
-    "onlineBackendUnavailable": "El servidor en línea (Cloud Functions) aún no está desplegado en este proyecto Firebase."
+    "onlineBackendUnavailable": "El servidor en línea (Cloud Functions) aún no está desplegado en este proyecto Firebase.",
+    "rateLimitExceeded": "Demasiadas solicitudes en poco tiempo. Espera un momento e inténtalo de nuevo."
   },
   "de": {
     "settings": "Einstellungen",
@@ -1001,7 +1005,8 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "save": "Speichern",
     "noPermission": "Keine Berechtigung für diese Aktion.",
     "errorOccurred": "Ein unerwarteter Fehler ist aufgetreten. Bitte erneut versuchen.",
-    "onlineBackendUnavailable": "Das Online-Backend (Cloud Functions) ist für dieses Firebase-Projekt noch nicht bereitgestellt."
+    "onlineBackendUnavailable": "Das Online-Backend (Cloud Functions) ist für dieses Firebase-Projekt noch nicht bereitgestellt.",
+    "rateLimitExceeded": "Zu viele Anfragen in kurzer Zeit. Bitte warte einen Moment und versuche es erneut."
   },
   "tr": {
     "settings": "Ayarlar",
@@ -1051,7 +1056,8 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "save": "Kaydet",
     "noPermission": "Bu işlem için izniniz yok.",
     "errorOccurred": "Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.",
-    "onlineBackendUnavailable": "Çevrimiçi oyun sunucusu (Cloud Functions) bu Firebase projesinde henüz dağıtılmamış."
+    "onlineBackendUnavailable": "Çevrimiçi oyun sunucusu (Cloud Functions) bu Firebase projesinde henüz dağıtılmamış.",
+    "rateLimitExceeded": "Kısa sürede çok fazla istek gönderildi. Lütfen biraz bekleyip tekrar deneyin."
   },
   "pt": {
     "settings": "Configurações",
@@ -1101,7 +1107,8 @@ export const uiTranslations: Record<string, Record<string, string>> = {
     "save": "Salvar",
     "noPermission": "Você não tem permissão para realizar esta ação.",
     "errorOccurred": "Ocorreu um erro inesperado. Tente novamente.",
-    "onlineBackendUnavailable": "O servidor online (Cloud Functions) ainda não foi implantado neste projeto Firebase."
+    "onlineBackendUnavailable": "O servidor online (Cloud Functions) ainda não foi implantado neste projeto Firebase.",
+    "rateLimitExceeded": "Muitas solicitações em pouco tempo. Aguarde um momento e tente novamente."
   }
 };
 

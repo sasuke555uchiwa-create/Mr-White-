@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Award,
   BarChart3,
@@ -85,6 +85,7 @@ interface CopyPack {
   resetLocal: string;
   confirmReset: string;
   cancel: string;
+  syncScopeNote: string;
 }
 
 const COPY_BY_LANG: Record<string, CopyPack> = {
@@ -113,6 +114,7 @@ const COPY_BY_LANG: Record<string, CopyPack> = {
     resetLocal: 'مسح المحلي',
     confirmReset: 'تأكيد المسح',
     cancel: 'إلغاء',
+    syncScopeNote: 'تتم مزامنة إحصائيات الأونلاين سحابياً عبر أجهزتك، بينما يُحفظ اللعب المحلي على هذا المتصفح فقط.',
   },
   en: {
     sectionTitle: 'Game Statistics & Roles',
@@ -139,6 +141,7 @@ const COPY_BY_LANG: Record<string, CopyPack> = {
     resetLocal: 'Reset Local',
     confirmReset: 'Confirm Reset',
     cancel: 'Cancel',
+    syncScopeNote: 'Online stats sync via cloud across devices; Pass & Play stats are saved on this browser.',
   },
   fr: {
     sectionTitle: 'Statistiques & Rôles',
@@ -165,6 +168,7 @@ const COPY_BY_LANG: Record<string, CopyPack> = {
     resetLocal: 'Réinitialiser local',
     confirmReset: 'Confirmer',
     cancel: 'Annuler',
+    syncScopeNote: 'Les stats en ligne sont synchronisées dans le cloud ; le mode local reste sur ce navigateur.',
   },
   es: {
     sectionTitle: 'Estadísticas y Roles',
@@ -191,6 +195,7 @@ const COPY_BY_LANG: Record<string, CopyPack> = {
     resetLocal: 'Borrar local',
     confirmReset: 'Confirmar',
     cancel: 'Cancelar',
+    syncScopeNote: 'Las estadísticas en línea se sincronizan en la nube; el modo local se guarda en este navegador.',
   },
   de: {
     sectionTitle: 'Spielstatistiken & Rollen',
@@ -217,6 +222,7 @@ const COPY_BY_LANG: Record<string, CopyPack> = {
     resetLocal: 'Lokal löschen',
     confirmReset: 'Bestätigen',
     cancel: 'Abbrechen',
+    syncScopeNote: 'Online-Statistiken werden in der Cloud synchronisiert; lokale Runden bleiben in diesem Browser.',
   },
   tr: {
     sectionTitle: 'Oyun İstatistikleri ve Roller',
@@ -243,6 +249,7 @@ const COPY_BY_LANG: Record<string, CopyPack> = {
     resetLocal: 'Yereli Sıfırla',
     confirmReset: 'Onayla',
     cancel: 'İptal',
+    syncScopeNote: 'Çevrimiçi istatistikler bulutta eşitlenir; yerel oyun verileri yalnızca bu tarayıcıda saklanır.',
   },
   pt: {
     sectionTitle: 'Estatísticas e Papéis',
@@ -269,6 +276,7 @@ const COPY_BY_LANG: Record<string, CopyPack> = {
     resetLocal: 'Limpar Local',
     confirmReset: 'Confirmar',
     cancel: 'Cancelar',
+    syncScopeNote: 'Estatísticas online sincronizam na nuvem; partidas locais ficam salvas apenas neste navegador.',
   },
 };
 
@@ -285,6 +293,10 @@ export const GameStatistics: React.FC<GameStatisticsProps> = ({
   const [localPlayerFilter, setLocalPlayerFilter] = useState<string>('__all__');
   const [confirmReset, setConfirmReset] = useState(false);
   const [sessionSnapshot, setSessionSnapshot] = useState(() => getSessionStats(userId));
+
+  useEffect(() => {
+    setSessionSnapshot(getSessionStats(userId));
+  }, [userId, profile.stats?.played]);
 
   const localPlayerNames = useMemo(
     () =>
@@ -323,9 +335,14 @@ export const GameStatistics: React.FC<GameStatisticsProps> = ({
     >
       {/* Header Row & Scope Switcher */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-        <div className="flex items-center gap-2">
-          <BarChart3 className="w-5 h-5 text-primary shrink-0" />
-          <h3 className="text-lg font-black text-text-main">{copy.sectionTitle}</h3>
+        <div>
+          <div className="flex items-center gap-2">
+            <BarChart3 className="w-5 h-5 text-primary shrink-0" />
+            <h3 className="text-lg font-black text-text-main">{copy.sectionTitle}</h3>
+          </div>
+          <p className="text-[11px] font-bold text-text-muted mt-1 text-start">
+            {copy.syncScopeNote}
+          </p>
         </div>
 
         <div

@@ -162,6 +162,19 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["user1", "user2"]
+    },
+    "RateLimitBucket": {
+      "title": "RateLimitBucket",
+      "description": "Server-only transactional sliding-window rate limit counter for callable endpoints.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 64 },
+        "windowStart": { "type": "number" },
+        "count": { "type": "number" },
+        "expiresAt": { "type": "number" }
+      },
+      "required": ["uid", "action", "windowStart", "count", "expiresAt"]
     }
   },
   "firestore": {
@@ -204,6 +217,10 @@
     "/friendships/{friendshipId}": {
       "schema": { "$ref": "#/entities/Friendship" },
       "description": "Active friendships between users."
+    },
+    "/rateLimits/{limitId}": {
+      "schema": { "$ref": "#/entities/RateLimitBucket" },
+      "description": "Server-only Cloud Functions abuse prevention rate limit buckets."
     }
   }
 }
