@@ -19,6 +19,9 @@ const ALLOWED_CATEGORIES = new Set(['standard', 'animals', 'food', 'places', 'ob
 function getCurrentTime(deps) {
     return deps.now ? deps.now() : Date.now();
 }
+function getRateDeps(deps) {
+    return { db: deps.db, now: deps.now, toTimestamp: deps.toTimestamp };
+}
 function assertSafeId(value, label = 'identifier') {
     if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{2,128}$/.test(value.trim())) {
         throw new errors_1.FunctionActionError('invalid-argument', `Invalid ${label}.`);
@@ -308,7 +311,7 @@ function applyMemberRemovalInTx(params) {
 async function executeCreateRoom(deps, uid, authToken, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.createRoom);
+    await (0, rateLimit_1.enforceRateLimit)(getRateDeps(deps), uid, rateLimit_1.RATE_LIMITS.createRoom);
     const settings = sanitizeRoomSettings(dataIn || {});
     const hostInfo = await resolveCallerPlayerInfo(deps.db, uid, authToken);
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -395,7 +398,7 @@ async function executeCreateRoom(deps, uid, authToken, dataIn) {
 async function executeJoinRoom(deps, uid, authToken, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.joinRoom);
+    await (0, rateLimit_1.enforceRateLimit)(getRateDeps(deps), uid, rateLimit_1.RATE_LIMITS.joinRoom);
     const rawRoomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
     const rawCode = typeof dataIn?.secretCode === 'string' ? dataIn.secretCode.trim() : '';
     let targetRoomId = rawRoomId;
@@ -465,7 +468,7 @@ async function executeJoinRoom(deps, uid, authToken, dataIn) {
 async function executeQuickJoinRoom(deps, uid, authToken) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.quickJoinRoom);
+    await (0, rateLimit_1.enforceRateLimit)(getRateDeps(deps), uid, rateLimit_1.RATE_LIMITS.quickJoinRoom);
     const callerInfo = await resolveCallerPlayerInfo(deps.db, uid, authToken);
     const candidatesSnap = await deps.db
         .collection('rooms')
@@ -574,13 +577,17 @@ async function executeKickPlayer(deps, uid, dataIn) {
     if (targetUid === uid) {
         throw new errors_1.FunctionActionError('invalid-argument', 'Invalid kick parameters.');
     }
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.kickPlayer);
+    const rateDeps = getRateDeps(deps);
+    (0, rateLimit_1.assertNotRateLimitBlocked)(rateDeps, uid, rateLimit_1.RATE_LIMITS.kickPlayer);
     const roomRef = deps.db.collection('rooms').doc(roomId);
     const privateStateRef = roomRef.collection('privateState').doc('current');
+    const rateLimitRef = (0, rateLimit_1.getRateLimitDocRef)(deps.db, uid, rateLimit_1.RATE_LIMITS.kickPlayer);
+    const nowMs = getCurrentTime(deps);
     const result = await deps.db.runTransaction(async (tx) => {
-        const [roomSnap, privateStateSnap] = await Promise.all([
+        const [roomSnap, privateStateSnap, rateSnap] = await Promise.all([
             tx.get(roomRef),
             tx.get(privateStateRef),
+            tx.get(rateLimitRef),
         ]);
         if (!roomSnap.exists)
             throw new errors_1.FunctionActionError('not-found', 'Room not found.');
@@ -601,6 +608,8 @@ async function executeKickPlayer(deps, uid, dataIn) {
             !['SETUP_PENDING', 'CATEGORY_SELECT', 'RESULT'].includes(data.gameState.phase)) {
             profileMap = await (0, matchSettlement_1.readPlayerProfileDocs)(deps.db, tx, remainingPlayers.map((p) => p.uid));
         }
+        const nextRateDoc = (0, rateLimit_1.evaluateRateLimitInTx)(rateDeps, uid, rateLimit_1.RATE_LIMITS.kickPlayer, rateSnap.exists, rateSnap.exists ? rateSnap.data() : undefined, nowMs);
+        tx.set(rateLimitRef, nextRateDoc);
         return applyMemberRemovalInTx({
             deps,
             tx,
@@ -621,13 +630,15 @@ async function executeKickPlayer(deps, uid, dataIn) {
 async function executeUpdateRoomSettings(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    if (!roomId)
-        throw new errors_1.FunctionActionError('invalid-argument', 'Missing roomId.');
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    const rateDeps = getRateDeps(deps);
+    (0, rateLimit_1.assertNotRateLimitBlocked)(rateDeps, uid, rateLimit_1.RATE_LIMITS.updateRoomSettings);
     const settings = sanitizeRoomSettings(dataIn || {});
     const roomRef = deps.db.collection('rooms').doc(roomId);
+    const rateLimitRef = (0, rateLimit_1.getRateLimitDocRef)(deps.db, uid, rateLimit_1.RATE_LIMITS.updateRoomSettings);
+    const nowMs = getCurrentTime(deps);
     await deps.db.runTransaction(async (tx) => {
-        const snap = await tx.get(roomRef);
+        const [snap, rateSnap] = await Promise.all([tx.get(roomRef), tx.get(rateLimitRef)]);
         if (!snap.exists)
             throw new errors_1.FunctionActionError('not-found', 'Room not found.');
         const data = snap.data();
@@ -637,8 +648,10 @@ async function executeUpdateRoomSettings(deps, uid, dataIn) {
         if (data.status !== 'waiting') {
             throw new errors_1.FunctionActionError('failed-precondition', 'Cannot edit settings during active game.');
         }
+        const nextRateDoc = (0, rateLimit_1.evaluateRateLimitInTx)(rateDeps, uid, rateLimit_1.RATE_LIMITS.updateRoomSettings, rateSnap.exists, rateSnap.exists ? rateSnap.data() : undefined, nowMs);
         const playerCount = Array.isArray(data.players) ? data.players.length : 1;
         const safeMax = Math.max(Math.max(3, playerCount), settings.maxPlayers);
+        tx.set(rateLimitRef, nextRateDoc);
         tx.update(roomRef, {
             maxPlayers: safeMax,
             language: settings.language,
@@ -654,14 +667,18 @@ async function executeUpdateRoomSettings(deps, uid, dataIn) {
 async function executePromoteHost(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
-    const roomId = typeof dataIn?.roomId === 'string' ? dataIn.roomId.trim() : '';
-    const targetUid = typeof dataIn?.targetUid === 'string' ? dataIn.targetUid.trim() : '';
-    if (!roomId || !targetUid || targetUid === uid) {
+    const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+    const targetUid = assertSafeId(dataIn?.targetUid, 'targetUid');
+    if (targetUid === uid) {
         throw new errors_1.FunctionActionError('invalid-argument', 'Invalid promoteHost parameters.');
     }
+    const rateDeps = getRateDeps(deps);
+    (0, rateLimit_1.assertNotRateLimitBlocked)(rateDeps, uid, rateLimit_1.RATE_LIMITS.promoteHost);
     const roomRef = deps.db.collection('rooms').doc(roomId);
+    const rateLimitRef = (0, rateLimit_1.getRateLimitDocRef)(deps.db, uid, rateLimit_1.RATE_LIMITS.promoteHost);
+    const nowMs = getCurrentTime(deps);
     await deps.db.runTransaction(async (tx) => {
-        const snap = await tx.get(roomRef);
+        const [snap, rateSnap] = await Promise.all([tx.get(roomRef), tx.get(rateLimitRef)]);
         if (!snap.exists)
             throw new errors_1.FunctionActionError('not-found', 'Room not found.');
         const data = snap.data();
@@ -672,6 +689,8 @@ async function executePromoteHost(deps, uid, dataIn) {
         if (!targetPlayer) {
             throw new errors_1.FunctionActionError('not-found', 'Target player not in room.');
         }
+        const nextRateDoc = (0, rateLimit_1.evaluateRateLimitInTx)(rateDeps, uid, rateLimit_1.RATE_LIMITS.promoteHost, rateSnap.exists, rateSnap.exists ? rateSnap.data() : undefined, nowMs);
+        tx.set(rateLimitRef, nextRateDoc);
         tx.update(roomRef, {
             hostId: targetPlayer.uid,
             hostName: targetPlayer.name,
@@ -685,10 +704,13 @@ async function executeToggleReady(deps, uid, dataIn) {
     if (!uid)
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
     const roomId = assertSafeId(dataIn?.roomId, 'roomId');
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.toggleReady);
+    const rateDeps = getRateDeps(deps);
+    (0, rateLimit_1.assertNotRateLimitBlocked)(rateDeps, uid, rateLimit_1.RATE_LIMITS.toggleReady);
     const roomRef = deps.db.collection('rooms').doc(roomId);
+    const rateLimitRef = (0, rateLimit_1.getRateLimitDocRef)(deps.db, uid, rateLimit_1.RATE_LIMITS.toggleReady);
+    const nowMs = getCurrentTime(deps);
     await deps.db.runTransaction(async (tx) => {
-        const snap = await tx.get(roomRef);
+        const [snap, rateSnap] = await Promise.all([tx.get(roomRef), tx.get(rateLimitRef)]);
         if (!snap.exists)
             throw new errors_1.FunctionActionError('not-found', 'Room not found.');
         const data = snap.data();
@@ -700,7 +722,9 @@ async function executeToggleReady(deps, uid, dataIn) {
         if (idx === -1) {
             throw new errors_1.FunctionActionError('permission-denied', 'You are not a member of this room.');
         }
+        const nextRateDoc = (0, rateLimit_1.evaluateRateLimitInTx)(rateDeps, uid, rateLimit_1.RATE_LIMITS.toggleReady, rateSnap.exists, rateSnap.exists ? rateSnap.data() : undefined, nowMs);
         const updatedPlayers = players.map((p) => p.uid === uid ? { ...p, isReady: !p.isReady } : p);
+        tx.set(rateLimitRef, nextRateDoc);
         tx.update(roomRef, {
             players: updatedPlayers,
             updatedAt: deps.serverTimestamp(),
@@ -716,11 +740,14 @@ async function executeSendRoomChat(deps, uid, dataIn) {
     if (!text) {
         throw new errors_1.FunctionActionError('invalid-argument', 'Invalid chat message.');
     }
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, uid, rateLimit_1.RATE_LIMITS.sendRoomChat);
+    const rateDeps = getRateDeps(deps);
+    (0, rateLimit_1.assertNotRateLimitBlocked)(rateDeps, uid, rateLimit_1.RATE_LIMITS.sendRoomChat);
     const roomRef = deps.db.collection('rooms').doc(roomId);
-    const nowIso = new Date(getCurrentTime(deps)).toISOString();
+    const rateLimitRef = (0, rateLimit_1.getRateLimitDocRef)(deps.db, uid, rateLimit_1.RATE_LIMITS.sendRoomChat);
+    const nowMs = getCurrentTime(deps);
+    const nowIso = new Date(nowMs).toISOString();
     await deps.db.runTransaction(async (tx) => {
-        const snap = await tx.get(roomRef);
+        const [snap, rateSnap] = await Promise.all([tx.get(roomRef), tx.get(rateLimitRef)]);
         if (!snap.exists)
             throw new errors_1.FunctionActionError('not-found', 'Room not found.');
         const data = snap.data();
@@ -729,14 +756,16 @@ async function executeSendRoomChat(deps, uid, dataIn) {
         if (!member) {
             throw new errors_1.FunctionActionError('permission-denied', 'Only room members can send messages.');
         }
+        const nextRateDoc = (0, rateLimit_1.evaluateRateLimitInTx)(rateDeps, uid, rateLimit_1.RATE_LIMITS.sendRoomChat, rateSnap.exists, rateSnap.exists ? rateSnap.data() : undefined, nowMs);
         const existing = Array.isArray(data.messages) ? data.messages : [];
         const msg = {
-            id: `${getCurrentTime(deps)}-${Math.random().toString(36).slice(2, 7)}`,
+            id: `${nowMs}-${Math.random().toString(36).slice(2, 7)}`,
             senderId: uid,
             senderName: member.name,
             text,
             timestamp: nowIso,
         };
+        tx.set(rateLimitRef, nextRateDoc);
         tx.update(roomRef, {
             messages: [...existing, msg].slice(-60),
             updatedAt: deps.serverTimestamp(),

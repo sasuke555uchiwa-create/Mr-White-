@@ -15,19 +15,25 @@ import firebaseConfig from './firebase-applet-config.json';
 const app = initializeApp(firebaseConfig);
 
 const appCheckSiteKey = import.meta.env.VITE_FIREBASE_APPCHECK_SITE_KEY?.trim();
-if (typeof window !== 'undefined' && appCheckSiteKey) {
-  try {
-    const debugToken = import.meta.env.VITE_FIREBASE_APPCHECK_DEBUG_TOKEN?.trim();
-    if (import.meta.env.DEV && debugToken) {
-      (self as unknown as Record<string, unknown>).FIREBASE_APPCHECK_DEBUG_TOKEN =
-        debugToken === 'true' ? true : debugToken;
+if (typeof window !== 'undefined') {
+  if (appCheckSiteKey) {
+    try {
+      const debugToken = import.meta.env.VITE_FIREBASE_APPCHECK_DEBUG_TOKEN?.trim();
+      if (import.meta.env.DEV && debugToken) {
+        (self as unknown as Record<string, unknown>).FIREBASE_APPCHECK_DEBUG_TOKEN =
+          debugToken === 'true' ? true : debugToken;
+      }
+      initializeAppCheck(app, {
+        provider: new ReCaptchaV3Provider(appCheckSiteKey),
+        isTokenAutoRefreshEnabled: true,
+      });
+    } catch (err) {
+      console.warn('Firebase App Check initialization skipped:', err);
     }
-    initializeAppCheck(app, {
-      provider: new ReCaptchaV3Provider(appCheckSiteKey),
-      isTokenAutoRefreshEnabled: true,
-    });
-  } catch (err) {
-    console.warn('Firebase App Check initialization skipped:', err);
+  } else if (!import.meta.env.DEV) {
+    console.warn(
+      'VITE_FIREBASE_APPCHECK_SITE_KEY is not configured; Cloud Functions with App Check enforcement may reject requests.'
+    );
   }
 }
 

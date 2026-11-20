@@ -13,7 +13,12 @@ import {
   applyMatchSettlementWrites,
   readPlayerProfileDocs,
 } from './matchSettlement';
-import { RATE_LIMITS, enforceRateLimit } from './rateLimit';
+import {
+  RATE_LIMITS,
+  assertNotRateLimitBlocked,
+  evaluateRateLimitInTx,
+  getRateLimitDocRef,
+} from './rateLimit';
 import { isMrWhiteGuessMatch, pickServerWordPair } from './wordData';
 
 export const FORCE_RESOLVE_MIN_ELAPSED_MS = 15_000;
@@ -27,10 +32,15 @@ export interface GameHandlerDeps {
   db: DbLike;
   serverTimestamp: () => any;
   now?: () => number;
+  toTimestamp?: (ms: number) => any;
 }
 
 function getCurrentTime(deps: GameHandlerDeps): number {
   return deps.now ? deps.now() : Date.now();
+}
+
+function getRateDeps(deps: GameHandlerDeps) {
+  return { db: deps.db, now: deps.now, toTimestamp: deps.toTimestamp };
 }
 
 function assertSafeId(value: unknown, label: string): string {
@@ -99,12 +109,15 @@ export async function executeBeginMatch(
 ) {
   if (!uid) throw new FunctionActionError('unauthenticated', 'Authentication required.');
   const roomId = assertSafeId(dataIn?.roomId, 'roomId');
-  await enforceRateLimit({ db: deps.db, now: deps.now }, uid, RATE_LIMITS.beginMatch);
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.beginMatch);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.beginMatch);
+  const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const snap = await tx.get(roomRef);
+    const [snap, rateSnap] = await Promise.all([tx.get(roomRef), tx.get(rateLimitRef)]);
     if (!snap.exists) throw new FunctionActionError('not-found', 'Room not found.');
     const data = snap.data()!;
     const players: ServerRoomPlayer[] = Array.isArray(data.players) ? data.players : [];
@@ -126,6 +139,16 @@ export async function executeBeginMatch(
       throw new FunctionActionError('failed-precondition', 'Not all players are ready.');
     }
 
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.beginMatch,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+
+    tx.set(rateLimitRef, nextRateDoc);
     tx.update(roomRef, {
       status: 'playing',
       gameState: {
@@ -145,15 +168,19 @@ export async function executeStartRound(
 ) {
   if (!uid) throw new FunctionActionError('unauthenticated', 'Authentication required.');
   const roomId = assertSafeId(dataIn?.roomId, 'roomId');
-  await enforceRateLimit({ db: deps.db, now: deps.now }, uid, RATE_LIMITS.startRound);
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.startRound);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
   const privateStateRef = roomRef.collection('privateState').doc('current');
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.startRound);
+  const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const [roomSnap, prevPrivateSnap] = await Promise.all([
+    const [roomSnap, prevPrivateSnap, rateSnap] = await Promise.all([
       tx.get(roomRef),
       tx.get(privateStateRef),
+      tx.get(rateLimitRef),
     ]);
 
     if (!roomSnap.exists) throw new FunctionActionError('not-found', 'Room not found.');
@@ -203,6 +230,16 @@ export async function executeStartRound(
       settledMatches: prevSettled,
     };
 
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.startRound,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+
+    tx.set(rateLimitRef, nextRateDoc);
     tx.set(privateStateRef, {
       ...privateState,
       updatedAt: deps.serverTimestamp(),
@@ -291,15 +328,19 @@ export async function executeMarkRevealReady(
 ) {
   if (!uid) throw new FunctionActionError('unauthenticated', 'Authentication required.');
   const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.markRevealReady);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
   const privateStateRef = roomRef.collection('privateState').doc('current');
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.markRevealReady);
   const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const [roomSnap, privateSnap] = await Promise.all([
+    const [roomSnap, privateSnap, rateSnap] = await Promise.all([
       tx.get(roomRef),
       tx.get(privateStateRef),
+      tx.get(rateLimitRef),
     ]);
     if (!roomSnap.exists || !privateSnap.exists) {
       throw new FunctionActionError('not-found', 'Active match not found.');
@@ -325,15 +366,24 @@ export async function executeMarkRevealReady(
       ? gameState.readyPlayers
       : [];
     if (existingReady.includes(uid)) {
-      return; // Idempotent duplicate ready confirmation
+      return; // Idempotent duplicate ready confirmation: skip writes and quota
     }
+
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.markRevealReady,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
 
     const readySet = new Set<string>(existingReady);
     readySet.add(uid);
     const readyPlayers = Array.from(readySet);
 
+    tx.set(rateLimitRef, nextRateDoc);
     if (readyPlayers.length >= players.length) {
-      const privateState = privateSnap.data() as PrivateGameStateDoc;
       const turnDuration = Number(data.turnDurationSeconds || 45);
       const turnOrder = buildServerTurnOrder(players, privateState.rolesByUid, 1);
 
@@ -374,13 +424,15 @@ export async function executeSubmitClue(
   if (!text) {
     throw new FunctionActionError('invalid-argument', 'Clue text is required.');
   }
-  await enforceRateLimit({ db: deps.db, now: deps.now }, uid, RATE_LIMITS.submitClue);
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.submitClue);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.submitClue);
   const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const snap = await tx.get(roomRef);
+    const [snap, rateSnap] = await Promise.all([tx.get(roomRef), tx.get(rateLimitRef)]);
     if (!snap.exists) throw new FunctionActionError('not-found', 'Room not found.');
     const data = snap.data()!;
     if (data.status !== 'playing') {
@@ -408,6 +460,15 @@ export async function executeSubmitClue(
       throw new FunctionActionError('permission-denied', 'It is not your turn to speak.');
     }
 
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.submitClue,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+
     const clue = {
       id: `${nowMs}-${Math.random().toString(36).slice(2, 6)}`,
       uid: speaker.uid,
@@ -426,6 +487,7 @@ export async function executeSubmitClue(
       clue
     );
 
+    tx.set(rateLimitRef, nextRateDoc);
     tx.update(roomRef, {
       gameState: nextGameState,
       updatedAt: deps.serverTimestamp(),
@@ -450,11 +512,15 @@ export async function executeAdvanceTurn(
       ? dataIn.expectedTurnIndex
       : null;
 
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.advanceTurn);
+
   const roomRef = deps.db.collection('rooms').doc(roomId);
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.advanceTurn);
   const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const snap = await tx.get(roomRef);
+    const [snap, rateSnap] = await Promise.all([tx.get(roomRef), tx.get(rateLimitRef)]);
     if (!snap.exists) {
       throw new FunctionActionError('not-found', 'Room not found.');
     }
@@ -471,12 +537,12 @@ export async function executeAdvanceTurn(
       throw new FunctionActionError('failed-precondition', 'Turns can only advance during PLAYING.');
     }
     if (gameState.turnsCompleted) {
-      return; // Already completed all turns (idempotent)
+      return; // Already completed all turns (idempotent: 0 writes)
     }
 
     const currentIndex = Number(gameState.currentTurnIndex || 0);
     if (expectedTurnIndex !== null && expectedTurnIndex !== currentIndex) {
-      return; // Already advanced by another client (idempotent)
+      return; // Already advanced by another client (idempotent: 0 writes)
     }
 
     const turnOrder: string[] = Array.isArray(gameState.turnOrder) ? gameState.turnOrder : [];
@@ -501,6 +567,15 @@ export async function executeAdvanceTurn(
         'Only host can advance an absent speaker turn before timer expires.'
       );
     }
+
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.advanceTurn,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
 
     const language = typeof data.language === 'string' ? data.language : 'ar';
     const labelText =
@@ -532,6 +607,7 @@ export async function executeAdvanceTurn(
       extraClue
     );
 
+    tx.set(rateLimitRef, nextRateDoc);
     tx.update(roomRef, {
       gameState: nextGameState,
       updatedAt: deps.serverTimestamp(),
@@ -548,15 +624,19 @@ export async function executeStartVoting(
 ) {
   if (!uid) throw new FunctionActionError('unauthenticated', 'Authentication required.');
   const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.startVoting);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
   const privateStateRef = roomRef.collection('privateState').doc('current');
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.startVoting);
   const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const [roomSnap, privateSnap] = await Promise.all([
+    const [roomSnap, privateSnap, rateSnap] = await Promise.all([
       tx.get(roomRef),
       tx.get(privateStateRef),
+      tx.get(rateLimitRef),
     ]);
     if (!roomSnap.exists || !privateSnap.exists) {
       throw new FunctionActionError('not-found', 'Active match not found.');
@@ -583,6 +663,16 @@ export async function executeStartVoting(
     const privateState = privateSnap.data() as PrivateGameStateDoc;
     assertMatchStateSync(gameState, privateState);
 
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.startVoting,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+
+    tx.set(rateLimitRef, nextRateDoc);
     tx.update(privateStateRef, {
       votesByUid: {},
       updatedAt: deps.serverTimestamp(),
@@ -618,15 +708,19 @@ export async function executeSubmitVote(
   if (suspectUid === uid) {
     throw new FunctionActionError('invalid-argument', 'Invalid vote target.');
   }
-  await enforceRateLimit({ db: deps.db, now: deps.now }, uid, RATE_LIMITS.submitVote);
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.submitVote);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
   const privateStateRef = roomRef.collection('privateState').doc('current');
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.submitVote);
+  const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const [roomSnap, privateSnap] = await Promise.all([
+    const [roomSnap, privateSnap, rateSnap] = await Promise.all([
       tx.get(roomRef),
       tx.get(privateStateRef),
+      tx.get(rateLimitRef),
     ]);
     if (!roomSnap.exists || !privateSnap.exists) {
       throw new FunctionActionError('not-found', 'Active match not found.');
@@ -657,9 +751,19 @@ export async function executeSubmitVote(
       throw new FunctionActionError('failed-precondition', 'You have already voted in this round.');
     }
 
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.submitVote,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+
     const votesByUid: Record<string, string> = { ...existingVotes, [uid]: suspectUid };
     const votedUids = Array.from(new Set(Object.keys(votesByUid).filter((v) => aliveUids.has(v))));
 
+    tx.set(rateLimitRef, nextRateDoc);
     tx.update(privateStateRef, {
       votesByUid,
       updatedAt: deps.serverTimestamp(),
@@ -706,15 +810,19 @@ export async function executeResolveVotes(
 ) {
   if (!uid) throw new FunctionActionError('unauthenticated', 'Authentication required.');
   const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.resolveVotes);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
   const privateStateRef = roomRef.collection('privateState').doc('current');
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.resolveVotes);
   const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const [roomSnap, privateSnap] = await Promise.all([
+    const [roomSnap, privateSnap, rateSnap] = await Promise.all([
       tx.get(roomRef),
       tx.get(privateStateRef),
+      tx.get(rateLimitRef),
     ]);
     if (!roomSnap.exists || !privateSnap.exists) {
       throw new FunctionActionError('not-found', 'Active match not found.');
@@ -771,11 +879,21 @@ export async function executeResolveVotes(
       throw new FunctionActionError('failed-precondition', 'No valid votes cast yet.');
     }
 
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.resolveVotes,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+
     const revealedRole = privateState.rolesByUid[tally.mostVotedId] || 'citizen';
     const votersForEliminated = Object.entries(votesByUid)
       .filter(([, target]) => target === tally.mostVotedId)
       .map(([voter]) => voter);
 
+    tx.set(rateLimitRef, nextRateDoc);
     tx.update(roomRef, {
       gameState: {
         ...gameState,
@@ -800,15 +918,19 @@ export async function executeProceedAfterVoteReveal(
 ) {
   if (!uid) throw new FunctionActionError('unauthenticated', 'Authentication required.');
   const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.proceedAfterVoteReveal);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
   const privateStateRef = roomRef.collection('privateState').doc('current');
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.proceedAfterVoteReveal);
   const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const [roomSnap, privateSnap] = await Promise.all([
+    const [roomSnap, privateSnap, rateSnap] = await Promise.all([
       tx.get(roomRef),
       tx.get(privateStateRef),
+      tx.get(rateLimitRef),
     ]);
     if (!roomSnap.exists || !privateSnap.exists) {
       throw new FunctionActionError('not-found', 'Active match not found.');
@@ -846,6 +968,15 @@ export async function executeProceedAfterVoteReveal(
     const targetRole = privateState.rolesByUid[targetUid] || 'citizen';
 
     if (targetRole === 'mrwhite') {
+      const nextRateDoc = evaluateRateLimitInTx(
+        rateDeps,
+        uid,
+        RATE_LIMITS.proceedAfterVoteReveal,
+        rateSnap.exists,
+        rateSnap.exists ? rateSnap.data() : undefined,
+        nowMs
+      );
+      tx.set(rateLimitRef, nextRateDoc);
       tx.update(roomRef, {
         gameState: {
           ...gameState,
@@ -866,6 +997,16 @@ export async function executeProceedAfterVoteReveal(
       tx,
       updatedPlayers.map((p) => p.uid)
     );
+
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.proceedAfterVoteReveal,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+    tx.set(rateLimitRef, nextRateDoc);
 
     const winCheck = evaluateOnlineWin(updatedPlayers, privateState.rolesByUid);
     if (winCheck.isOver && winCheck.winner && winCheck.winReason) {
@@ -942,16 +1083,19 @@ export async function executeSubmitMrWhiteGuess(
   const roomId = assertSafeId(dataIn?.roomId, 'roomId');
   const guess = sanitizePlainText(dataIn?.guess, 80);
   const forceEliminateMissing = Boolean(dataIn?.forceEliminateMissing);
-  await enforceRateLimit({ db: deps.db, now: deps.now }, uid, RATE_LIMITS.submitMrWhiteGuess);
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.submitMrWhiteGuess);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
   const privateStateRef = roomRef.collection('privateState').doc('current');
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.submitMrWhiteGuess);
   const nowMs = getCurrentTime(deps);
 
   return deps.db.runTransaction(async (tx) => {
-    const [roomSnap, privateSnap] = await Promise.all([
+    const [roomSnap, privateSnap, rateSnap] = await Promise.all([
       tx.get(roomRef),
       tx.get(privateStateRef),
+      tx.get(rateLimitRef),
     ]);
     if (!roomSnap.exists || !privateSnap.exists) {
       throw new FunctionActionError('not-found', 'Active match not found.');
@@ -996,6 +1140,16 @@ export async function executeSubmitMrWhiteGuess(
       tx,
       players.map((p) => p.uid)
     );
+
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.submitMrWhiteGuess,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+    tx.set(rateLimitRef, nextRateDoc);
 
     if (isCorrect) {
       applyMatchSettlementWrites({
@@ -1096,14 +1250,19 @@ export async function executeReturnToLobby(
 ) {
   if (!uid) throw new FunctionActionError('unauthenticated', 'Authentication required.');
   const roomId = assertSafeId(dataIn?.roomId, 'roomId');
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.returnToLobby);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
   const privateStateRef = roomRef.collection('privateState').doc('current');
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.returnToLobby);
+  const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const [snap, privateSnap] = await Promise.all([
+    const [snap, privateSnap, rateSnap] = await Promise.all([
       tx.get(roomRef),
       tx.get(privateStateRef),
+      tx.get(rateLimitRef),
     ]);
     if (!snap.exists) throw new FunctionActionError('not-found', 'Room not found.');
     const data = snap.data()!;
@@ -1122,6 +1281,16 @@ export async function executeReturnToLobby(
         'Can only return to lobby after match completion or before round starts.'
       );
     }
+
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.returnToLobby,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+    tx.set(rateLimitRef, nextRateDoc);
 
     for (const p of currentPlayers) {
       tx.delete(roomRef.collection('privatePlayers').doc(p.uid));
@@ -1174,15 +1343,19 @@ export async function executeNextMatch(
 ) {
   if (!uid) throw new FunctionActionError('unauthenticated', 'Authentication required.');
   const roomId = assertSafeId(dataIn?.roomId, 'roomId');
-  await enforceRateLimit({ db: deps.db, now: deps.now }, uid, RATE_LIMITS.nextMatch);
+  const rateDeps = getRateDeps(deps);
+  assertNotRateLimitBlocked(rateDeps, uid, RATE_LIMITS.nextMatch);
 
   const roomRef = deps.db.collection('rooms').doc(roomId);
   const privateStateRef = roomRef.collection('privateState').doc('current');
+  const rateLimitRef = getRateLimitDocRef(deps.db, uid, RATE_LIMITS.nextMatch);
+  const nowMs = getCurrentTime(deps);
 
   await deps.db.runTransaction(async (tx) => {
-    const [snap, privateSnap] = await Promise.all([
+    const [snap, privateSnap, rateSnap] = await Promise.all([
       tx.get(roomRef),
       tx.get(privateStateRef),
+      tx.get(rateLimitRef),
     ]);
     if (!snap.exists) throw new FunctionActionError('not-found', 'Room not found.');
     const data = snap.data()!;
@@ -1198,6 +1371,16 @@ export async function executeNextMatch(
         'Next match can only start after the current match is finished.'
       );
     }
+
+    const nextRateDoc = evaluateRateLimitInTx(
+      rateDeps,
+      uid,
+      RATE_LIMITS.nextMatch,
+      rateSnap.exists,
+      rateSnap.exists ? rateSnap.data() : undefined,
+      nowMs
+    );
+    tx.set(rateLimitRef, nextRateDoc);
 
     for (const p of currentPlayers) {
       tx.delete(roomRef.collection('privatePlayers').doc(p.uid));

@@ -10,6 +10,7 @@ const roomHandlers_1 = require("./roomHandlers");
 const deps = {
     db: firebaseAdmin_1.db,
     serverTimestamp: () => firestore_1.FieldValue.serverTimestamp(),
+    toTimestamp: (ms) => firestore_1.Timestamp.fromMillis(ms),
 };
 function handleCallable(fn) {
     return fn().catch((err) => {

@@ -7,6 +7,12 @@ exports.executeRejectFriendRequest = executeRejectFriendRequest;
 exports.executeRemoveFriend = executeRemoveFriend;
 const errors_1 = require("./errors");
 const rateLimit_1 = require("./rateLimit");
+function getCurrentTime(deps) {
+    return deps.now ? deps.now() : Date.now();
+}
+function getRateDeps(deps) {
+    return { db: deps.db, now: deps.now, toTimestamp: deps.toTimestamp };
+}
 function assertSafeUid(uid, label = 'user ID') {
     if (typeof uid !== 'string' || !/^[a-zA-Z0-9_-]{3,128}$/.test(uid.trim())) {
         throw new errors_1.FunctionActionError('invalid-argument', `Invalid ${label}.`);
@@ -32,7 +38,7 @@ async function executeSendFriendRequest(deps, uid, dataIn) {
     if (fromId === toId) {
         throw new errors_1.FunctionActionError('invalid-argument', 'Cannot send friend request to yourself.');
     }
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, fromId, rateLimit_1.RATE_LIMITS.sendFriendRequest);
+    await (0, rateLimit_1.enforceRateLimit)(getRateDeps(deps), fromId, rateLimit_1.RATE_LIMITS.sendFriendRequest);
     const friendshipMeta = getFriendshipDocId(fromId, toId);
     const forwardReqId = `${fromId}_${toId}`;
     const reverseReqId = `${toId}_${fromId}`;
@@ -74,10 +80,13 @@ async function executeAcceptFriendRequest(deps, uid, dataIn) {
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
     const responderUid = assertSafeUid(uid, 'caller user ID');
     const requestId = assertSafeCompositeId(dataIn?.requestId);
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, responderUid, rateLimit_1.RATE_LIMITS.respondFriendRequest);
+    const rateDeps = getRateDeps(deps);
+    (0, rateLimit_1.assertNotRateLimitBlocked)(rateDeps, responderUid, rateLimit_1.RATE_LIMITS.respondFriendRequest);
+    const reqRef = deps.db.collection('friendRequests').doc(requestId);
+    const rateLimitRef = (0, rateLimit_1.getRateLimitDocRef)(deps.db, responderUid, rateLimit_1.RATE_LIMITS.respondFriendRequest);
+    const nowMs = getCurrentTime(deps);
     return deps.db.runTransaction(async (tx) => {
-        const reqRef = deps.db.collection('friendRequests').doc(requestId);
-        const reqSnap = await tx.get(reqRef);
+        const [reqSnap, rateSnap] = await Promise.all([tx.get(reqRef), tx.get(rateLimitRef)]);
         if (!reqSnap.exists) {
             throw new errors_1.FunctionActionError('not-found', 'Friend request not found.');
         }
@@ -91,6 +100,8 @@ async function executeAcceptFriendRequest(deps, uid, dataIn) {
         const friendshipMeta = getFriendshipDocId(reqData.fromId, reqData.toId);
         const friendshipRef = deps.db.collection('friendships').doc(friendshipMeta.id);
         const existingFriendship = await tx.get(friendshipRef);
+        const nextRateDoc = (0, rateLimit_1.evaluateRateLimitInTx)(rateDeps, responderUid, rateLimit_1.RATE_LIMITS.respondFriendRequest, rateSnap.exists, rateSnap.exists ? rateSnap.data() : undefined, nowMs);
+        tx.set(rateLimitRef, nextRateDoc);
         tx.update(reqRef, {
             status: 'accepted',
             updatedAt: deps.serverTimestamp(),
@@ -110,10 +121,13 @@ async function executeRejectFriendRequest(deps, uid, dataIn) {
         throw new errors_1.FunctionActionError('unauthenticated', 'Authentication required.');
     const callerUid = assertSafeUid(uid, 'caller user ID');
     const requestId = assertSafeCompositeId(dataIn?.requestId);
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, callerUid, rateLimit_1.RATE_LIMITS.respondFriendRequest);
+    const rateDeps = getRateDeps(deps);
+    (0, rateLimit_1.assertNotRateLimitBlocked)(rateDeps, callerUid, rateLimit_1.RATE_LIMITS.respondFriendRequest);
+    const reqRef = deps.db.collection('friendRequests').doc(requestId);
+    const rateLimitRef = (0, rateLimit_1.getRateLimitDocRef)(deps.db, callerUid, rateLimit_1.RATE_LIMITS.respondFriendRequest);
+    const nowMs = getCurrentTime(deps);
     return deps.db.runTransaction(async (tx) => {
-        const reqRef = deps.db.collection('friendRequests').doc(requestId);
-        const reqSnap = await tx.get(reqRef);
+        const [reqSnap, rateSnap] = await Promise.all([tx.get(reqRef), tx.get(rateLimitRef)]);
         if (!reqSnap.exists) {
             return { success: true };
         }
@@ -121,6 +135,8 @@ async function executeRejectFriendRequest(deps, uid, dataIn) {
         if (reqData.toId !== callerUid && reqData.fromId !== callerUid) {
             throw new errors_1.FunctionActionError('permission-denied', 'Not authorized to cancel this friend request.');
         }
+        const nextRateDoc = (0, rateLimit_1.evaluateRateLimitInTx)(rateDeps, callerUid, rateLimit_1.RATE_LIMITS.respondFriendRequest, rateSnap.exists, rateSnap.exists ? rateSnap.data() : undefined, nowMs);
+        tx.set(rateLimitRef, nextRateDoc);
         tx.delete(reqRef);
         return { success: true };
     });
@@ -133,14 +149,19 @@ async function executeRemoveFriend(deps, uid, dataIn) {
     if (callerUid === friendUid) {
         throw new errors_1.FunctionActionError('invalid-argument', 'Cannot remove yourself as a friend.');
     }
-    await (0, rateLimit_1.enforceRateLimit)({ db: deps.db, now: deps.now }, callerUid, rateLimit_1.RATE_LIMITS.respondFriendRequest);
+    const rateDeps = getRateDeps(deps);
+    (0, rateLimit_1.assertNotRateLimitBlocked)(rateDeps, callerUid, rateLimit_1.RATE_LIMITS.respondFriendRequest);
     const { id } = getFriendshipDocId(callerUid, friendUid);
+    const friendshipRef = deps.db.collection('friendships').doc(id);
+    const rateLimitRef = (0, rateLimit_1.getRateLimitDocRef)(deps.db, callerUid, rateLimit_1.RATE_LIMITS.respondFriendRequest);
+    const nowMs = getCurrentTime(deps);
     await deps.db.runTransaction(async (tx) => {
-        const friendshipRef = deps.db.collection('friendships').doc(id);
-        const snap = await tx.get(friendshipRef);
-        if (snap.exists) {
-            tx.delete(friendshipRef);
-        }
+        const [snap, rateSnap] = await Promise.all([tx.get(friendshipRef), tx.get(rateLimitRef)]);
+        if (!snap.exists)
+            return;
+        const nextRateDoc = (0, rateLimit_1.evaluateRateLimitInTx)(rateDeps, callerUid, rateLimit_1.RATE_LIMITS.respondFriendRequest, rateSnap.exists, rateSnap.exists ? rateSnap.data() : undefined, nowMs);
+        tx.set(rateLimitRef, nextRateDoc);
+        tx.delete(friendshipRef);
     });
     return { success: true };
 }

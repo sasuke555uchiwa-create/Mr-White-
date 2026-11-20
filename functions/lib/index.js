@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.nextMatch = exports.returnToLobby = exports.submitMrWhiteGuess = exports.proceedAfterVoteReveal = exports.resolveVotes = exports.submitVote = exports.startVoting = exports.advanceTurn = exports.submitClue = exports.markRevealReady = exports.startRound = exports.beginMatch = exports.sendRoomChat = exports.toggleReady = exports.promoteHost = exports.kickPlayer = exports.updateRoomSettings = exports.leaveRoom = exports.quickJoinRoom = exports.joinRoom = exports.createRoom = exports.removeFriend = exports.rejectFriendRequest = exports.acceptFriendRequest = exports.sendFriendRequest = exports.checkAdminStatus = void 0;
+exports.cleanupExpiredRateLimits = exports.nextMatch = exports.returnToLobby = exports.submitMrWhiteGuess = exports.proceedAfterVoteReveal = exports.resolveVotes = exports.submitVote = exports.startVoting = exports.advanceTurn = exports.submitClue = exports.markRevealReady = exports.startRound = exports.beginMatch = exports.sendRoomChat = exports.toggleReady = exports.promoteHost = exports.kickPlayer = exports.updateRoomSettings = exports.leaveRoom = exports.quickJoinRoom = exports.joinRoom = exports.createRoom = exports.removeFriend = exports.rejectFriendRequest = exports.acceptFriendRequest = exports.sendFriendRequest = exports.checkAdminStatus = void 0;
 var adminFunctions_1 = require("./adminFunctions");
 Object.defineProperty(exports, "checkAdminStatus", { enumerable: true, get: function () { return adminFunctions_1.checkAdminStatus; } });
 var socialFunctions_1 = require("./socialFunctions");
@@ -31,4 +31,6 @@ Object.defineProperty(exports, "proceedAfterVoteReveal", { enumerable: true, get
 Object.defineProperty(exports, "submitMrWhiteGuess", { enumerable: true, get: function () { return gameFunctions_1.submitMrWhiteGuess; } });
 Object.defineProperty(exports, "returnToLobby", { enumerable: true, get: function () { return gameFunctions_1.returnToLobby; } });
 Object.defineProperty(exports, "nextMatch", { enumerable: true, get: function () { return gameFunctions_1.nextMatch; } });
+var rateLimitCleanup_1 = require("./rateLimitCleanup");
+Object.defineProperty(exports, "cleanupExpiredRateLimits", { enumerable: true, get: function () { return rateLimitCleanup_1.cleanupExpiredRateLimits; } });
 //# sourceMappingURL=index.js.map

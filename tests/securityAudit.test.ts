@@ -1,10 +1,14 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DESIGNATED_OWNER_EMAIL, executeCheckAdminStatus } from '../functions/src/adminPolicy';
+import { getCallableOptions, resolveEnforceAppCheck } from '../functions/src/callableConfig';
 import { DbLike, DocRefLike, TxLike } from '../functions/src/errors';
 import {
   FORCE_RESOLVE_MIN_ELAPSED_MS,
   executeAdvanceTurn,
   executeBeginMatch,
+  executeMarkRevealReady,
   executeNextMatch,
   executeProceedAfterVoteReveal,
   executeResolveVotes,
@@ -18,14 +22,22 @@ import {
   executeCreateRoom,
   executeJoinRoom,
   executeKickPlayer,
+  executePromoteHost,
   executeQuickJoinRoom,
+  executeUpdateRoomSettings,
 } from '../functions/src/roomHandlers';
 import {
   executeAcceptFriendRequest,
   executeRemoveFriend,
   executeSendFriendRequest,
 } from '../functions/src/socialHandlers';
-import { RATE_LIMITS, enforceRateLimit } from '../functions/src/rateLimit';
+import {
+  RATE_LIMITS,
+  RATE_LIMIT_CLEANUP_GRACE_MS,
+  enforceRateLimit,
+  executeCleanupExpiredRateLimits,
+  readExpiryMs,
+} from '../functions/src/rateLimit';
 import { buildPublicProfileBackfill } from '../utils/profileBackfill';
 import { SPECIAL_ROLES } from '../data/specialRoles';
 
@@ -36,6 +48,7 @@ import { SPECIAL_ROLES } from '../data/specialRoles';
 class InMemoryFirestore implements DbLike {
   private store = new Map<string, Record<string, any>>();
   private autoCounter = 0;
+  public txCount = 0;
 
   setRaw(path: string, data: Record<string, any>) {
     this.store.set(path, structuredClone(data));
@@ -75,19 +88,42 @@ class InMemoryFirestore implements DbLike {
         return {
           exists: data !== undefined,
           id,
-          ref: this.makeDocRef(docPath),
+          ref: this.attachPath(this.makeDocRef(docPath), docPath),
           data: () => data,
         };
       },
     };
   }
 
+  private matchesFilter(
+    actual: unknown,
+    op: string,
+    expected: unknown
+  ): boolean {
+    if (op === '<=') {
+      const actualIsNum = typeof actual === 'number';
+      const expectedIsNum = typeof expected === 'number';
+      if (actualIsNum && expectedIsNum) {
+        return (actual as number) <= (expected as number);
+      }
+      if (!actualIsNum && !expectedIsNum) {
+        const aMs = readExpiryMs(actual);
+        const eMs = readExpiryMs(expected);
+        return aMs > 0 && eMs > 0 && aMs <= eMs;
+      }
+      return false;
+    }
+    return actual === expected;
+  }
+
   private makeCollectionRef(colPath: string) {
-    const queryWith = (filters: Array<{ field: string; value: any }> = []) => ({
-      where: (field: string, _op: string, value: any) =>
-        queryWith([...filters, { field, value }]),
-      limit: (_n: number) => ({
-        get: async () => this.queryDocs(colPath, filters),
+    const queryWith = (
+      filters: Array<{ field: string; op: string; value: any }> = []
+    ) => ({
+      where: (field: string, op: string, value: any) =>
+        queryWith([...filters, { field, op, value }]),
+      limit: (n: number) => ({
+        get: async () => this.queryDocs(colPath, filters, n),
       }),
       get: async () => this.queryDocs(colPath, filters),
     });
@@ -98,27 +134,35 @@ class InMemoryFirestore implements DbLike {
         return this.makeDocRef(`${colPath}/${docId}`);
       },
       get: async () => this.queryDocs(colPath, []),
-      where: (field: string, _op: string, value: any) => queryWith([{ field, value }]),
-      limit: (_n: number) => ({
-        get: async () => this.queryDocs(colPath, []),
+      where: (field: string, op: string, value: any) =>
+        queryWith([{ field, op, value }]),
+      limit: (n: number) => ({
+        get: async () => this.queryDocs(colPath, [], n),
       }),
     };
   }
 
-  private queryDocs(colPath: string, filters: Array<{ field: string; value: any }>) {
+  private queryDocs(
+    colPath: string,
+    filters: Array<{ field: string; op: string; value: any }>,
+    limitCount?: number
+  ) {
     const prefix = `${colPath}/`;
     const docs: any[] = [];
-    for (const [path, data] of this.store.entries()) {
-      if (!path.startsWith(prefix)) continue;
-      const remainder = path.slice(prefix.length);
+    for (const [docPath, data] of this.store.entries()) {
+      if (!docPath.startsWith(prefix)) continue;
+      const remainder = docPath.slice(prefix.length);
       if (remainder.includes('/')) continue;
-      if (filters.every((f) => data[f.field] === f.value)) {
+      if (filters.every((f) => this.matchesFilter(data[f.field], f.op, f.value))) {
         docs.push({
           exists: true,
           id: remainder,
-          ref: this.makeDocRef(path),
+          ref: this.attachPath(this.makeDocRef(docPath), docPath),
           data: () => structuredClone(data),
         });
+        if (limitCount !== undefined && docs.length >= limitCount) {
+          break;
+        }
       }
     }
     return { docs };
@@ -180,6 +224,7 @@ class InMemoryFirestore implements DbLike {
   }
 
   async runTransaction<T>(fn: (tx: TxLike) => Promise<T>): Promise<T> {
+    this.txCount += 1;
     const staging = new Map<string, Record<string, any>>(
       Array.from(this.store.entries()).map(([k, v]) => [k, structuredClone(v)])
     );
@@ -965,5 +1010,349 @@ describe('P0 & P1 Security Audit Regression Suite', () => {
     // Once window elapses, quota resets cleanly
     currentNow += RATE_LIMITS.createRoom.windowMs + 10;
     await expect(enforceRateLimit(deps, uid, RATE_LIMITS.createRoom)).resolves.toBeUndefined();
+  });
+
+  it('16. App Check fails closed in Cloud Functions prod, honors overrides, and every callable uses shared options', () => {
+    // Deployed Cloud Functions runtime without explicit env flag -> fail closed (true)
+    expect(resolveEnforceAppCheck({ K_SERVICE: 'createRoom' })).toBe(true);
+    expect(resolveEnforceAppCheck({ FUNCTION_TARGET: 'createRoom' })).toBe(true);
+    // Explicit override always honored
+    expect(resolveEnforceAppCheck({ K_SERVICE: 'createRoom', ENFORCE_APP_CHECK: 'false' })).toBe(
+      false
+    );
+    expect(resolveEnforceAppCheck({ FUNCTIONS_EMULATOR: 'true', ENFORCE_APP_CHECK: 'true' })).toBe(
+      true
+    );
+    // Local emulator / Vitest defaults to false
+    expect(resolveEnforceAppCheck({ FUNCTIONS_EMULATOR: 'true' })).toBe(false);
+    expect(resolveEnforceAppCheck({ NODE_ENV: 'test', VITEST: 'true' })).toBe(false);
+
+    // Shared callable options always expose enforceAppCheck boolean
+    const opts = getCallableOptions();
+    expect(typeof opts.enforceAppCheck).toBe('boolean');
+
+    // Every exported onCall across all callable modules must use callableOpts / getCallableOptions()
+    const callableFiles = [
+      'functions/src/adminFunctions.ts',
+      'functions/src/roomFunctions.ts',
+      'functions/src/gameFunctions.ts',
+      'functions/src/socialFunctions.ts',
+    ];
+    for (const relPath of callableFiles) {
+      const src = fs.readFileSync(path.resolve(process.cwd(), relPath), 'utf8');
+      const onCallMatches = src.match(/onCall\s*\(/g) || [];
+      const sharedOptMatches = src.match(/onCall\s*\(\s*(?:callableOpts|getCallableOptions\()/g) || [];
+      expect(onCallMatches.length).toBeGreaterThan(0);
+      expect(sharedOptMatches.length).toBe(onCallMatches.length);
+    }
+
+    // Never commit private debug tokens or secrets in tracked example env files
+    const rootExample = fs.readFileSync(path.resolve(process.cwd(), '.env.example'), 'utf8');
+    expect(rootExample).not.toMatch(/APPCHECK_DEBUG_TOKEN\s*=\s*["']?[0-9a-f-]{12,}/i);
+    const fnExample = fs.readFileSync(path.resolve(process.cwd(), 'functions/.env.example'), 'utf8');
+    expect(fnExample).toMatch(/ENFORCE_APP_CHECK\s*=\s*true/);
+  });
+
+  it('17. Rate limits protect newly covered endpoints (updateRoomSettings, promoteHost, startVoting, advanceTurn, markRevealReady)', async () => {
+    const db = new InMemoryFirestore();
+    const deps = createDeps(db);
+
+    db.setRaw('rooms/r_rl', {
+      id: 'r_rl',
+      hostId: 'p1',
+      status: 'waiting',
+      difficulty: 'medium',
+      turnDurationSeconds: 45,
+      isPublic: true,
+      playerIds: ['p1', 'p2', 'p3'],
+      players: [makePlayer('p1'), makePlayer('p2'), makePlayer('p3')],
+      gameState: {
+        phase: 'LOBBY',
+        matchId: '',
+        round: 1,
+        turnOrder: [],
+        currentTurnIndex: 0,
+        turnsCompleted: false,
+      },
+    });
+
+    // updateRoomSettings
+    for (let i = 0; i < RATE_LIMITS.updateRoomSettings.maxRequests; i++) {
+      await executeUpdateRoomSettings(deps, 'p1', {
+        roomId: 'r_rl',
+        difficulty: i % 2 === 0 ? 'easy' : 'hard',
+      });
+    }
+    await expect(
+      executeUpdateRoomSettings(deps, 'p1', { roomId: 'r_rl', difficulty: 'medium' })
+    ).rejects.toThrow(/Rate limit exceeded/i);
+
+    // promoteHost (always called by p1 by resetting hostId='p1' between iterations)
+    for (let i = 0; i < RATE_LIMITS.promoteHost.maxRequests; i++) {
+      const cur = db.getRaw('rooms/r_rl')!;
+      cur.hostId = 'p1';
+      db.setRaw('rooms/r_rl', cur);
+      await executePromoteHost(deps, 'p1', { roomId: 'r_rl', targetUid: 'p2' });
+    }
+    const curPromote = db.getRaw('rooms/r_rl')!;
+    curPromote.hostId = 'p1';
+    db.setRaw('rooms/r_rl', curPromote);
+    await expect(
+      executePromoteHost(deps, 'p1', { roomId: 'r_rl', targetUid: 'p2' })
+    ).rejects.toThrow(/Rate limit exceeded/i);
+
+    // Switch room to REVEAL and test markRevealReady
+    const roomReveal = db.getRaw('rooms/r_rl')!;
+    roomReveal.hostId = 'p1';
+    roomReveal.status = 'playing';
+    roomReveal.gameState = {
+      phase: 'REVEAL',
+      matchId: 'm_rl',
+      round: 1,
+      turnOrder: ['p1', 'p2', 'p3'],
+      currentTurnIndex: 0,
+      turnsCompleted: false,
+      readyPlayers: [],
+    };
+    db.setRaw('rooms/r_rl', roomReveal);
+    db.setRaw('rooms/r_rl/privateState/current', {
+      matchId: 'm_rl',
+      round: 1,
+      civilianWord: 'قمر',
+      undercoverWord: 'نجم',
+      decoys: [],
+      impostorIds: ['p3'],
+      undercoverIds: [],
+      rolesByUid: { p1: 'citizen', p2: 'citizen', p3: 'mrwhite' },
+      votesByUid: {},
+      settledMatches: [],
+    });
+
+    for (let i = 0; i < RATE_LIMITS.markRevealReady.maxRequests; i++) {
+      // Clear readyPlayers before each call so calls aren't short-circuited by idempotency
+      const cur = db.getRaw('rooms/r_rl')!;
+      cur.gameState.readyPlayers = [];
+      db.setRaw('rooms/r_rl', cur);
+      await executeMarkRevealReady(deps, 'p1', { roomId: 'r_rl' });
+    }
+    const curReveal = db.getRaw('rooms/r_rl')!;
+    curReveal.gameState.readyPlayers = [];
+    db.setRaw('rooms/r_rl', curReveal);
+    await expect(executeMarkRevealReady(deps, 'p1', { roomId: 'r_rl' })).rejects.toThrow(
+      /Rate limit exceeded/i
+    );
+
+    // Switch room to PLAYING to verify advanceTurn and startVoting rate limits
+    const roomPlaying = db.getRaw('rooms/r_rl')!;
+    roomPlaying.gameState = {
+      phase: 'PLAYING',
+      matchId: 'm_rl',
+      round: 1,
+      turnOrder: ['p1', 'p2', 'p3'],
+      currentTurnIndex: 0,
+      turnsCompleted: false,
+    };
+    db.setRaw('rooms/r_rl', roomPlaying);
+
+    for (let i = 0; i < RATE_LIMITS.advanceTurn.maxRequests; i++) {
+      const cur = db.getRaw('rooms/r_rl')!;
+      cur.gameState.currentTurnIndex = 0;
+      cur.gameState.turnsCompleted = false;
+      db.setRaw('rooms/r_rl', cur);
+      await executeAdvanceTurn(deps, 'p1', { roomId: 'r_rl', expectedTurnIndex: 0 });
+    }
+    const curAdv = db.getRaw('rooms/r_rl')!;
+    curAdv.gameState.currentTurnIndex = 0;
+    curAdv.gameState.turnsCompleted = false;
+    db.setRaw('rooms/r_rl', curAdv);
+    await expect(
+      executeAdvanceTurn(deps, 'p1', { roomId: 'r_rl', expectedTurnIndex: 0 })
+    ).rejects.toThrow(/Rate limit exceeded/i);
+
+    // startVoting exhausted for p1
+    for (let i = 0; i < RATE_LIMITS.startVoting.maxRequests; i++) {
+      const cur = db.getRaw('rooms/r_rl')!;
+      cur.gameState.phase = 'PLAYING';
+      cur.gameState.turnsCompleted = true;
+      db.setRaw('rooms/r_rl', cur);
+      await executeStartVoting(deps, 'p1', { roomId: 'r_rl' });
+    }
+    const curVote = db.getRaw('rooms/r_rl')!;
+    curVote.gameState.phase = 'PLAYING';
+    curVote.gameState.turnsCompleted = true;
+    db.setRaw('rooms/r_rl', curVote);
+    await expect(executeStartVoting(deps, 'p1', { roomId: 'r_rl' })).rejects.toThrow(
+      /Rate limit exceeded/i
+    );
+  });
+
+  it('18. Handlers execute single-tx rate checking, skip quota on idempotent no-ops, and fast-fail exhausted bursts with 0 transactions', async () => {
+    const db = new InMemoryFirestore();
+    const deps = createDeps(db);
+
+    db.setRaw('rooms/r_opt', {
+      id: 'r_opt',
+      hostId: 'p1',
+      status: 'waiting',
+      playerIds: ['p1', 'p2', 'p3'],
+      players: [makePlayer('p1'), makePlayer('p2'), makePlayer('p3')],
+      gameState: {
+        phase: 'LOBBY',
+        matchId: '',
+        round: 1,
+        turnOrder: [],
+        currentTurnIndex: 0,
+        turnsCompleted: false,
+      },
+    });
+
+    // Single transaction per in-room action
+    const txBefore = db.txCount;
+    await executeUpdateRoomSettings(deps, 'p1', { roomId: 'r_opt', difficulty: 'hard' });
+    expect(db.txCount - txBefore).toBe(1);
+
+    // Exhaust promoteHost bucket for p1 cleanly, then ensure warm cache blocks subsequent calls with 0 Firestore transactions
+    for (let i = 0; i < RATE_LIMITS.promoteHost.maxRequests; i++) {
+      const cur = db.getRaw('rooms/r_opt')!;
+      cur.hostId = 'p1';
+      db.setRaw('rooms/r_opt', cur);
+      await executePromoteHost(deps, 'p1', { roomId: 'r_opt', targetUid: 'p2' });
+    }
+    const curExhaust = db.getRaw('rooms/r_opt')!;
+    curExhaust.hostId = 'p1';
+    db.setRaw('rooms/r_opt', curExhaust);
+    // First over-limit call detects exhaustion in tx and populates exhausted cache
+    await expect(
+      executePromoteHost(deps, 'p1', { roomId: 'r_opt', targetUid: 'p2' })
+    ).rejects.toThrow(/Rate limit exceeded/i);
+
+    const txBeforeBlocked = db.txCount;
+    await expect(
+      executePromoteHost(deps, 'p1', { roomId: 'r_opt', targetUid: 'p2' })
+    ).rejects.toThrow(/Rate limit exceeded/i);
+    expect(db.txCount).toBe(txBeforeBlocked);
+
+    // Switch room to active REVEAL to verify idempotent duplicate markRevealReady consumes 0 quota
+    db.setRaw('rooms/r_opt', {
+      ...db.getRaw('rooms/r_opt'),
+      hostId: 'p1',
+      status: 'playing',
+      gameState: {
+        phase: 'REVEAL',
+        matchId: 'm_opt',
+        round: 1,
+        turnOrder: ['p1', 'p2', 'p3'],
+        currentTurnIndex: 0,
+        turnsCompleted: false,
+        readyPlayers: ['p2'],
+      },
+    });
+    db.setRaw('rooms/r_opt/privateState/current', {
+      matchId: 'm_opt',
+      round: 1,
+      civilianWord: 'قمر',
+      undercoverWord: 'نجم',
+      decoys: [],
+      impostorIds: ['p3'],
+      undercoverIds: [],
+      rolesByUid: { p1: 'citizen', p2: 'citizen', p3: 'mrwhite' },
+      votesByUid: {},
+      settledMatches: [],
+    });
+    await executeMarkRevealReady(deps, 'p2', { roomId: 'r_opt' });
+    expect(db.getRaw('rateLimits/markRevealReady_p2')).toBeUndefined();
+
+    // Idempotent stale expectedTurnIndex on advanceTurn consumes 0 quota
+    const rPlay = db.getRaw('rooms/r_opt')!;
+    rPlay.gameState.phase = 'PLAYING';
+    rPlay.gameState.currentTurnIndex = 1;
+    db.setRaw('rooms/r_opt', rPlay);
+    await executeAdvanceTurn(deps, 'p1', { roomId: 'r_opt', expectedTurnIndex: 0 });
+    expect(db.getRaw('rateLimits/advanceTurn_p1')).toBeUndefined();
+  });
+
+  it('19. Rate limit expiresAt stores Timestamp/Date and scheduled cleanup deletes expired records while keeping active & grace records', async () => {
+    const db = new InMemoryFirestore();
+    let currentNow = 1_700_000_000_000;
+    const deps = { db, now: () => currentNow };
+
+    await enforceRateLimit(deps, 'ttl_user', RATE_LIMITS.createRoom);
+    const activeBucket = db.getRaw('rateLimits/createRoom_ttl_user')!;
+    expect(typeof activeBucket.expiresAt).not.toBe('number');
+    expect(readExpiryMs(activeBucket.expiresAt)).toBe(
+      currentNow + RATE_LIMITS.createRoom.windowMs
+    );
+
+    // Seed: (1) old Timestamp expired > grace, (2) legacy numeric expired > grace,
+    // (3) Timestamp expired only 10s ago (inside 60s grace), (4) active future Timestamp
+    db.setRaw('rateLimits/expired_ts', {
+      uid: 'u1',
+      action: 'joinRoom',
+      windowStart: currentNow - 300_000,
+      count: 3,
+      expiresAt: new Date(currentNow - RATE_LIMIT_CLEANUP_GRACE_MS - 5_000),
+    });
+    db.setRaw('rateLimits/expired_legacy_num', {
+      uid: 'u2',
+      action: 'joinRoom',
+      windowStart: currentNow - 300_000,
+      count: 2,
+      expiresAt: currentNow - RATE_LIMIT_CLEANUP_GRACE_MS - 1_000,
+    });
+    db.setRaw('rateLimits/within_grace_ts', {
+      uid: 'u3',
+      action: 'joinRoom',
+      windowStart: currentNow - 70_000,
+      count: 1,
+      expiresAt: new Date(currentNow - 10_000),
+    });
+
+    const cleanupRes = await executeCleanupExpiredRateLimits({ db, now: () => currentNow });
+    expect(cleanupRes.deletedCount).toBe(2);
+
+    expect(db.getRaw('rateLimits/expired_ts')).toBeUndefined();
+    expect(db.getRaw('rateLimits/expired_legacy_num')).toBeUndefined();
+    expect(db.getRaw('rateLimits/within_grace_ts')).toBeDefined();
+    expect(db.getRaw('rateLimits/createRoom_ttl_user')).toBeDefined();
+  });
+
+  it('20. Cloud Functions Node 22 runtime, named DB mapping, and frontend-to-backend callable exports stay in parity', () => {
+    const fnPkg = JSON.parse(
+      fs.readFileSync(path.resolve(process.cwd(), 'functions/package.json'), 'utf8')
+    );
+    expect(fnPkg.engines?.node).toBe('22');
+
+    const fbJson = JSON.parse(
+      fs.readFileSync(path.resolve(process.cwd(), 'firebase.json'), 'utf8')
+    );
+    const dbConfig = Array.isArray(fbJson.firestore) ? fbJson.firestore[0] : fbJson.firestore;
+    expect(dbConfig.database).toBe('ai-studio-379d796d-f978-4bae-a5f9-9fa5f7f43ac4');
+
+    const indexSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'functions/src/index.ts'),
+      'utf8'
+    );
+    expect(indexSrc).toContain('cleanupExpiredRateLimits');
+
+    const frontendFiles = [
+      'utils/onlineRoomService.ts',
+      'utils/friendService.ts',
+      'contexts/AuthContext.tsx',
+    ];
+    const calledNames = new Set<string>();
+    for (const rel of frontendFiles) {
+      const src = fs.readFileSync(path.resolve(process.cwd(), rel), 'utf8');
+      for (const m of src.matchAll(/callFn<[^>]*>\(\s*'([a-zA-Z0-9_]+)'/g)) {
+        calledNames.add(m[1]);
+      }
+      for (const m of src.matchAll(/httpsCallable<[^>]*>\(\s*functions\s*,\s*'([a-zA-Z0-9_]+)'/g)) {
+        calledNames.add(m[1]);
+      }
+    }
+
+    expect(calledNames.size).toBeGreaterThanOrEqual(20);
+    for (const fnName of calledNames) {
+      expect(indexSrc).toMatch(new RegExp(`\\b${fnName}\\b`));
+    }
   });
 });

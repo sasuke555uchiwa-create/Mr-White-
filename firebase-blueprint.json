@@ -172,7 +172,7 @@
         "action": { "type": "string", "maxLength": 64 },
         "windowStart": { "type": "number" },
         "count": { "type": "number" },
-        "expiresAt": { "type": "number" }
+        "expiresAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "action", "windowStart", "count", "expiresAt"]
     }

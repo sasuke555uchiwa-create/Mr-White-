@@ -1,4 +1,4 @@
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { getCallableOptions } from './callableConfig';
 import { DbLike, FunctionActionError } from './errors';
@@ -21,6 +21,7 @@ import {
 const deps = {
   db: db as unknown as DbLike,
   serverTimestamp: () => FieldValue.serverTimestamp(),
+  toTimestamp: (ms: number) => Timestamp.fromMillis(ms),
 };
 
 function handleCallable<T>(fn: () => Promise<T>): Promise<T> {

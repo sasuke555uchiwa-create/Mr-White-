@@ -1,3 +1,4 @@
+import { Timestamp } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { executeCheckAdminStatus } from './adminPolicy';
 import { getCallableOptions } from './callableConfig';
@@ -14,7 +15,10 @@ export const checkAdminStatus = onCall(getCallableOptions(), async (request) => 
     const uid = request.auth?.uid;
     if (uid) {
       await enforceRateLimit(
-        { db: db as unknown as DbLike },
+        {
+          db: db as unknown as DbLike,
+          toTimestamp: (ms: number) => Timestamp.fromMillis(ms),
+        },
         uid,
         RATE_LIMITS.checkAdminStatus
       );

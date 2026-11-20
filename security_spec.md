@@ -25,3 +25,20 @@
 10. **Non-Member Invite Code Snooping (`rooms/{roomId}/privateMeta/invite` get)**: User not in `rooms/{roomId}.playerIds` tries to read `privateMeta/invite` -> **DENIED**.
 11. **Server Private State Snooping (`rooms/{roomId}/privateState/current` get)**: Any client tries to read `civilianWord` or `votesByUid` -> **DENIED**.
 12. **Friend Request Forgery (`friendRequests/{id}` create/update)**: Attacker attempts to directly write `{ "fromId": "<victimUid>", "toId": "<attackerUid>", "status": "accepted" }` -> **DENIED** (`allow write: if false`).
+
+---
+
+## 3. Production App Check & Data Retention Controls
+1. **Cloud Functions App Check**: All 26 callable endpoints use `getCallableOptions()` (`enforceAppCheck: resolveEnforceAppCheck()`). Deployed Cloud Functions fail closed (`true`) in production unless explicitly disabled via `ENFORCE_APP_CHECK=false` for local testing. Production frontend builds must set `VITE_FIREBASE_APPCHECK_SITE_KEY` (reCAPTCHA v3 site key).
+2. **Cloud Firestore App Check (Separate Firebase Console Step)**: Cloud Functions `enforceAppCheck` does NOT automatically protect direct Firestore SDK reads (`users`, `publicProfiles`, `rooms`, `privatePlayers`, `friendRequests`, `friendships`). In Firebase Console -> **App Check** -> **APIs** -> **Cloud Firestore**, enable enforcement after verifying `VITE_FIREBASE_APPCHECK_SITE_KEY` is active on all deployed web origins (including App Hosting / custom domains) and unregister or register dev debug tokens safely without ever committing secrets.
+3. **Rate Limit Data Retention (`rateLimits/{bucketId}`)**:
+   - Every bucket writes `expiresAt` as a Firestore `Timestamp` (`Timestamp.fromMillis(windowStart + windowMs)`).
+   - **Recommended Native TTL Policy** (on named database `ai-studio-379d796d-f978-4bae-a5f9-9fa5f7f43ac4`):
+     ```bash
+     gcloud firestore fields ttls update expiresAt \
+       --collection-group=rateLimits \
+       --database=ai-studio-379d796d-f978-4bae-a5f9-9fa5f7f43ac4 \
+       --enable-ttl
+     ```
+   - **Fallback Scheduled Cleaner**: `cleanupExpiredRateLimits` runs every 60 minutes (requires Cloud Scheduler / Blaze billing when deployed) and deletes only buckets where `expiresAt <= now - 60_000`, guaranteeing active or boundary rate-limit windows are never removed.
+

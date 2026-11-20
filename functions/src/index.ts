@@ -30,3 +30,4 @@ export {
   returnToLobby,
   nextMatch,
 } from './gameFunctions';
+export { cleanupExpiredRateLimits } from './rateLimitCleanup';
